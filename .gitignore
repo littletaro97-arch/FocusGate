@@ -1,0 +1,19 @@
+# Gradle / Android build output
+.gradle/
+build/
+app/build/
+
+# Local machine config
+local.properties
+
+# IDE files
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Keystores should not be committed
+*.jks
+*.keystore
