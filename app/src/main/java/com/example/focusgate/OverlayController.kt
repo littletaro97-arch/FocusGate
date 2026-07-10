@@ -389,6 +389,7 @@ class OverlayController(
             Log.i(FocusGateLog.TAG, "entertainment control dragged target=$targetPackage x=${params.x} y=${params.y}")
         }
 
+        circle.accessibleClickAction = { showShortHint() }
         circle.setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -455,7 +456,6 @@ class OverlayController(
                             snapToEdge()
                         } else {
                             view.performClick()
-                            showShortHint()
                         }
                     }
                     true
@@ -597,7 +597,7 @@ class OverlayController(
     private fun dp(value: Int): Int = (value * service.resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val ENTERTAINMENT_END_HOLD_MS = 1_500L
+        private const val ENTERTAINMENT_END_HOLD_MS = 800L
         private const val HOLD_PROGRESS_TICK_MS = 30L
         private const val HOLD_PROGRESS_START_DELAY_MS = 160L
         private const val ENTERTAINMENT_HINT_DEBOUNCE_MS = 1_000L

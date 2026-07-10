@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.view.View
 
 class EntertainmentEndCircleView(context: Context) : View(context) {
+    var accessibleClickAction: (() -> Unit)? = null
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(205, 32, 37, 41)
         style = Paint.Style.FILL
@@ -15,7 +16,7 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
-        textSize = 14f * resources.displayMetrics.scaledDensity
+        textSize = resources.getDimension(R.dimen.entertainment_end_text_size)
         isFakeBoldText = true
     }
     private val ringBackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -44,6 +45,12 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
         progress = 0f
         holding = false
         invalidate()
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        accessibleClickAction?.invoke()
+        return true
     }
 
     override fun onDraw(canvas: Canvas) {

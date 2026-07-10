@@ -7,7 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -17,10 +17,12 @@ class StabilityForegroundService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var repository: GuardRepository
     private var countdownRunnable: Runnable? = null
+    private var permissionWarning: String? = null
 
     override fun onCreate() {
         super.onCreate()
         repository = GuardRepository(this)
+        running = true
         ensureChannel()
         Log.i(FocusGateLog.TAG, "stability foreground service created")
     }
@@ -31,6 +33,9 @@ class StabilityForegroundService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_PERMISSION_WARNING) {
+            permissionWarning = intent.getStringExtra(EXTRA_PERMISSION_WARNING)?.takeIf { it.isNotBlank() }
         }
 
         return runCatching {
@@ -47,14 +52,15 @@ class StabilityForegroundService : Service() {
     override fun onDestroy() {
         countdownRunnable?.let { handler.removeCallbacks(it) }
         countdownRunnable = null
+        running = false
         Log.w(FocusGateLog.TAG, "stability foreground service destroyed")
+        PermissionAlertCoordinator.evaluate(this, "foreground_service_destroyed")
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun ensureChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
             "SearchGate 稳定运行",
@@ -83,19 +89,21 @@ class StabilityForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
+        val builder = Notification.Builder(this, CHANNEL_ID)
+        val stopAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+            "停止",
+            stopIntent
+        ).build()
 
-        val title = if (entertainmentActive) {
+        val title = if (permissionWarning != null) {
+            "检索门：关键权限异常"
+        } else if (entertainmentActive) {
             "检索门：娱乐时间进行中"
         } else {
             "SearchGate 正在检测目标应用"
         }
-        val content = if (entertainmentActive) {
+        val content = permissionWarning ?: if (entertainmentActive) {
             "剩余 ${((remainingMs + 59_999L) / 60_000L).coerceAtLeast(1L)} 分钟，结束后将重新恢复限制。"
         } else {
             "用于提高无障碍监听稳定性，可在通知中停止。"
@@ -107,7 +115,7 @@ class StabilityForegroundService : Service() {
             .setContentText(content)
             .setContentIntent(openIntent)
             .setOngoing(false)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopIntent)
+            .addAction(stopAction)
             .build()
     }
 
@@ -144,7 +152,12 @@ class StabilityForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_STOP = "com.example.focusgate.action.STOP_STABILITY"
         private const val ACTION_SYNC = "com.example.focusgate.action.SYNC_ENTERTAINMENT"
+        private const val ACTION_PERMISSION_WARNING = "com.example.focusgate.action.PERMISSION_WARNING"
+        private const val EXTRA_PERMISSION_WARNING = "permissionWarning"
         private const val COUNTDOWN_UPDATE_MS = 30_000L
+        @Volatile private var running = false
+
+        fun isRunning(): Boolean = running
 
         fun startIfAllowed(context: Context) {
             start(context, null)
@@ -152,6 +165,23 @@ class StabilityForegroundService : Service() {
 
         fun syncEntertainmentState(context: Context) {
             start(context, ACTION_SYNC)
+        }
+
+        fun updatePermissionWarningIfRunning(context: Context, warning: String?): Boolean {
+            if (!running) return false
+            val intent = Intent(context, StabilityForegroundService::class.java)
+                .setAction(ACTION_PERMISSION_WARNING)
+                .putExtra(EXTRA_PERMISSION_WARNING, warning.orEmpty())
+            return runCatching {
+                context.startService(intent)
+                true
+            }.getOrElse {
+                Log.w(
+                    SearchGatePermissionAlertLog.TAG,
+                    "foreground notification update request failed error=${it.javaClass.simpleName}"
+                )
+                false
+            }
         }
 
         private fun start(context: Context, action: String?) {
@@ -163,11 +193,7 @@ class StabilityForegroundService : Service() {
                 if (action != null) setAction(action)
             }
             runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
+                context.startForegroundService(intent)
             }.onFailure {
                 Log.w(FocusGateLog.TAG, "start stability service failed: ${it.javaClass.simpleName}")
             }

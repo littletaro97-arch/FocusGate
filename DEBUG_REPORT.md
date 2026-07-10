@@ -149,3 +149,66 @@ APK：
 1. 做一次真机截图验收，覆盖普通屏、挖孔屏、水滴屏。
 2. 为众测包增加正式签名流程和固定 APK 命名规则。
 3. 若众测反馈 UI 稳定，再考虑清理旧调试文案和遗留技术状态代码。
+
+---
+
+# v0.5.3 应用选择性能、长按与权限异常提醒
+
+日期：2026-07-10
+
+## 截图问题定位
+
+- 截图中的“全 / 已 / 用 / 内”对应 `TargetFilterButton`。四个按钮等分一行后，Material Button 默认水平内边距继续占宽，两个汉字只能逐字换行。
+- 底部浅紫色矩形来自保存栏外层 `Surface(tonalElevation = 2.dp)` 的主题色调，不是 Checkbox、空 Button 或截图伪影。
+- 修复方式：筛选按钮使用 6dp 水平内容内边距并强制单行；删除保存栏外层色调 Surface，保留原有固定布局、已选数量和保存按钮。
+
+## 二级页性能根因与修复
+
+- 根因是 `TargetAppPickerScreen` 首次组合时同步调用 `installedLaunchableApps()`，在主线程查询 PackageManager、读取 112 个应用标签并加载全部图标，页面框架必须等待这些工作完成。
+- 页面现在先用空列表或内存元数据缓存渲染标题、搜索框、筛选栏和保存栏。
+- PackageManager 查询、标签读取和排序在 `Dispatchers.IO` 执行；图标只为 LazyColumn 当前可见项异步加载，并按包名做进程内缓存。
+- 每次进入仍在后台刷新元数据，因此安装/卸载应用不会被永久缓存遮蔽；二次进入先显示缓存，再接收刷新结果。
+- 搜索、筛选和行合并结果使用稳定 key 与 `remember`，不再因无关重组重复构建整表。
+
+真机 PKT110，112 个 Launcher 应用：
+
+- 冷首次进入：页面框架 206ms，完整列表 448ms；PackageManager 查询 10ms，映射与排序 229ms，总后台读取 240ms。
+- 同进程第二次进入：页面框架 132ms，完整列表 157ms；后台刷新 22ms。
+- 首屏图标缓存汇总：6 次 miss、6 个缓存项；没有逐行刷日志。
+
+## 长按结束娱乐
+
+- `ENTERTAINMENT_END_HOLD_MS` 从 1500ms 改为 800ms。
+- 触发判断和圆环进度仍共用同一常量；拖动、移出、抬手会取消进度，完成后只触发一次。
+- `EntertainmentEndCircleView.performClick()` 已补齐，普通短按和无障碍点击继续只提示“长按结束娱乐”。
+
+## 权限异常提醒
+
+- 新增 `PermissionAlertCoordinator`，检查无障碍、悬浮窗、应用级通知总开关/运行时权限和前台服务运行状态；电池优化白名单只记为建议状态。
+- 使用持久化异常签名做状态迁移与防重复；恢复正常后取消异常通知，后续再次关闭可重新提醒。
+- 通知可用时提交合并异常通知，点击后打开主界面并自动展开异常权限模块。
+- 通知权限关闭时不调用普通 `NotificationManager.notify()`；应用内显示红色说明，并仅在前台服务已经运行时尽力更新其通知内容。日志明确标记 `deliveryNotGuaranteed=true`。
+- `PermissionUtils.canPostNotifications()` 同时检查 Android 13+ 运行时权限和 `NotificationManager.areNotificationsEnabled()`，覆盖 Android 12 及以下或厂商系统的应用级总开关。
+- 检测点包括 Activity 恢复、通知授权结果、无障碍连接/中断/销毁、前台服务销毁，以及无障碍事件期间每 10 秒至多一次的低频检查。
+
+真机边界测试：
+
+- 关闭系统“允许通知”后，主界面显示红色降级说明。
+- 日志记录 `ordinary notification blocked`、`inAppRedState=true`、`deliveryNotGuaranteed=true`。
+- 再次启动同一异常记录 `duplicateSkipped=true`，没有重复提交。
+- 测试结束后已恢复“允许通知”，运行时权限为 `granted=true`。
+
+## 构建、Lint 与测试
+
+- `:app:assembleDebug`：成功。
+- `:app:assembleRelease`：成功，产物未签名。
+- `:app:lintDebug`：成功，0 error、9 个既有 warning；同时修复两个 minSdk 26 下调用 API 28 Handler 重载的历史错误。
+- `:app:testDebugUnitTest`：NO-SOURCE，项目仍无单元测试源码。
+- Debug APK SHA256：`2223183A3090FC9781BC3BC3274307BE8886CDEA39F9024C1F298CAF6F057FC6`。
+- Release unsigned APK SHA256：`9B23D414BAB161C505A09437E22FA0E8C4B864FB74B8445524BEAFA558A1F79E`。
+
+## 尚需人工回归
+
+- 800ms 长按的手感、半途松手、快速拖动和只触发一次，需要在真实娱乐倒计时状态逐项操作。
+- 小红书/Bilibili 资料查找、抖音纯限制、跨日取消锁和娱乐倒计时需要完整业务回归；本轮未修改这些状态机。
+- Release APK 未签名，不能作为正式分发包直接安装。

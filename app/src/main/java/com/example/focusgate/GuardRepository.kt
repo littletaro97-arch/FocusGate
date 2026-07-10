@@ -4,8 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import java.time.LocalDate
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 data class GuardState(
     val targetPackages: Set<String>,
@@ -57,6 +60,10 @@ data class EntertainmentSessionStatus(
 class GuardRepository(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    @Volatile private var installedAppMetadataCache: List<InstalledAppInfo> = emptyList()
+    private val appIconCache = ConcurrentHashMap<String, android.graphics.drawable.Drawable>()
+    private val appIconCacheHits = AtomicLong(0L)
+    private val appIconCacheMisses = AtomicLong(0L)
 
     fun state(): GuardState {
         migrateEntertainmentQuotaModel()
@@ -167,8 +174,10 @@ class GuardRepository(context: Context) {
     }
 
     fun installedLaunchableApps(): List<InstalledAppInfo> {
+        val totalStartedAt = SystemClock.elapsedRealtime()
         val pm = appContext.packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val queryStartedAt = SystemClock.elapsedRealtime()
         val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             pm.queryIntentActivities(
                 launcherIntent,
@@ -178,7 +187,9 @@ class GuardRepository(context: Context) {
             @Suppress("DEPRECATION")
             pm.queryIntentActivities(launcherIntent, 0)
         }
+        val queryElapsedMs = SystemClock.elapsedRealtime() - queryStartedAt
         val configs = targetAppConfigs().associateBy { it.packageName }
+        val mapSortStartedAt = SystemClock.elapsedRealtime()
         val rows = activities
             .mapNotNull { resolveInfo ->
                 val packageName = resolveInfo.activityInfo?.packageName?.trim().orEmpty()
@@ -189,7 +200,7 @@ class GuardRepository(context: Context) {
                     InstalledAppInfo(
                         packageName = packageName,
                         appName = appName,
-                        icon = runCatching { resolveInfo.loadIcon(pm) }.getOrNull(),
+                        icon = null,
                         isSelected = targetPackages().contains(packageName),
                         config = configs[packageName]
                     )
@@ -197,12 +208,33 @@ class GuardRepository(context: Context) {
             }
             .distinctBy { it.packageName }
             .sortedBy { it.appName.lowercase() }
+        installedAppMetadataCache = rows
+        val mapSortElapsedMs = SystemClock.elapsedRealtime() - mapSortStartedAt
         Log.i(
             SearchGateAppPickerLog.TAG,
-            "installedAppsRead totalResolveCount=${activities.size} launchableCount=${rows.size} selectedCount=${rows.count { it.isSelected }} packageVisibility=launcher-intent-query"
+            "installedAppsRead totalResolveCount=${activities.size} launchableCount=${rows.size} selectedCount=${rows.count { it.isSelected }} queryMs=$queryElapsedMs mapSortMs=$mapSortElapsedMs totalMs=${SystemClock.elapsedRealtime() - totalStartedAt} iconsDeferred=true packageVisibility=launcher-intent-query"
         )
         return rows
     }
+
+    fun cachedInstalledLaunchableApps(): List<InstalledAppInfo> = installedAppMetadataCache
+
+    fun cachedAppIcon(packageName: String): android.graphics.drawable.Drawable? {
+        val cached = appIconCache[packageName]
+        if (cached != null) appIconCacheHits.incrementAndGet()
+        return cached
+    }
+
+    fun loadAppIcon(packageName: String): android.graphics.drawable.Drawable? {
+        cachedAppIcon(packageName)?.let { return it }
+        appIconCacheMisses.incrementAndGet()
+        val loaded = runCatching { appContext.packageManager.getApplicationIcon(packageName) }.getOrNull()
+        if (loaded != null) appIconCache.putIfAbsent(packageName, loaded)
+        return loaded
+    }
+
+    fun appIconCacheSummary(): String =
+        "hits=${appIconCacheHits.get()} misses=${appIconCacheMisses.get()} size=${appIconCache.size}"
 
     fun saveInstalledAppSelections(selected: Map<String, String>): TargetAppSaveResult {
         val cleanSelected = selected

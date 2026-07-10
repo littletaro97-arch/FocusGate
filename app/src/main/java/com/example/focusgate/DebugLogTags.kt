@@ -13,7 +13,7 @@ object SearchGateAppTypeLog {
 }
 
 object SearchGateAppPickerLog {
-    const val TAG = "SearchGateAppPickerDebug"
+    const val TAG = "SearchGateAppPickerPerf"
 }
 
 object SearchGateDevModeLog {
@@ -22,4 +22,8 @@ object SearchGateDevModeLog {
 
 object SearchGateTargetAppLockLog {
     const val TAG = "SearchGateTargetAppLockDebug"
+}
+
+object SearchGatePermissionAlertLog {
+    const val TAG = "SearchGatePermissionAlert"
 }

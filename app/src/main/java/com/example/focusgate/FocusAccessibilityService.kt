@@ -21,12 +21,19 @@ class FocusAccessibilityService : AccessibilityService() {
     private var lastDouyinPageChangedAt = 0L
     private var lastDouyinAppSwitchAt = 0L
     private var lastDouyinActivityClass: String? = null
+    private var lastPermissionHealthCheckAt = 0L
+    private val returnRecheckRunnables = mutableMapOf<String, Runnable>()
+    private val douyinReturnRecheckRunnables = mutableListOf<Runnable>()
 
     override fun onServiceConnected() {
         repository = GuardRepository(this)
         overlayController = OverlayController(this, repository)
         Log.i(FocusGateLog.TAG, "accessibility service connected")
         StabilityForegroundService.startIfAllowed(this)
+        mainHandler.postDelayed(
+            { PermissionAlertCoordinator.evaluate(this, "accessibility_connected") },
+            PERMISSION_SERVICE_SETTLE_MS
+        )
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -55,6 +62,10 @@ class FocusAccessibilityService : AccessibilityService() {
         }
 
         val now = System.currentTimeMillis()
+        if (now - lastPermissionHealthCheckAt >= PERMISSION_HEALTH_CHECK_INTERVAL_MS) {
+            lastPermissionHealthCheckAt = now
+            PermissionAlertCoordinator.evaluate(this, "accessibility_event")
+        }
         if (lastForegroundPackage != foregroundPackage) {
             lastForegroundPackage = foregroundPackage
             if (foregroundPackage == TargetPlatform.DOUYIN.packageName) {
@@ -358,6 +369,8 @@ class FocusAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.w(FocusGateLog.TAG, "accessibility service interrupted")
+        cancelPendingRechecks()
+        PermissionAlertCoordinator.evaluate(this, "accessibility_interrupted", includeForegroundService = false)
         if (::overlayController.isInitialized) {
             overlayController.dismiss()
             overlayController.dismissEntertainmentControl()
@@ -366,10 +379,12 @@ class FocusAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         Log.w(FocusGateLog.TAG, "accessibility service destroyed")
+        cancelPendingRechecks()
         if (::overlayController.isInitialized) {
             overlayController.dismiss()
             overlayController.dismissEntertainmentControl()
         }
+        PermissionAlertCoordinator.evaluate(this, "accessibility_destroyed", includeForegroundService = false)
         super.onDestroy()
     }
 
@@ -611,28 +626,44 @@ class FocusAccessibilityService : AccessibilityService() {
     }
 
     private fun scheduleReturnRecheck(packageName: String) {
-        mainHandler.removeCallbacksAndMessages(packageName)
-        mainHandler.postDelayed({
+        returnRecheckRunnables.remove(packageName)?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            returnRecheckRunnables.remove(packageName)
             val root = rootInActiveWindow
             val currentPackage = root?.packageName?.toString()
-            if (currentPackage != packageName || overlayController.isShowing()) return@postDelayed
+            if (currentPackage != packageName || overlayController.isShowing()) return@Runnable
             val now = System.currentTimeMillis()
             val state = repository.state()
-            if (!repository.isSearchReturnCheckActive(packageName, now)) return@postDelayed
+            if (!repository.isSearchReturnCheckActive(packageName, now)) return@Runnable
             val pageKind = PageDetector.detect(packageName, root, state.lastKeyword)
             repository.logDecisionSnapshot(packageName, pageKind, now)
             handleSearchReturnCheck(packageName, pageKind, now, state)
-        }, packageName, RETURN_RECHECK_DELAY_MS)
+        }
+        returnRecheckRunnables[packageName] = runnable
+        mainHandler.postDelayed(runnable, RETURN_RECHECK_DELAY_MS)
     }
 
     private fun scheduleDouyinReturnRechecks(packageName: String) {
-        mainHandler.removeCallbacksAndMessages(DOUYIN_RECHECK_TOKEN)
+        douyinReturnRecheckRunnables.forEach { mainHandler.removeCallbacks(it) }
+        douyinReturnRecheckRunnables.clear()
         DOUYIN_RECHECK_DELAYS_MS.forEachIndexed { index, delayMs ->
-            mainHandler.postDelayed({
-                runDouyinReturnRecheck(packageName, index + 1)
-            }, DOUYIN_RECHECK_TOKEN, delayMs)
+            val runnable = object : Runnable {
+                override fun run() {
+                    douyinReturnRecheckRunnables.remove(this)
+                    runDouyinReturnRecheck(packageName, index + 1)
+                }
+            }
+            douyinReturnRecheckRunnables += runnable
+            mainHandler.postDelayed(runnable, delayMs)
         }
         Log.i(SearchGateDouyinLog.TAG, "scheduled bounded Douyin return recheck package=$packageName delays=${DOUYIN_RECHECK_DELAYS_MS.joinToString()}")
+    }
+
+    private fun cancelPendingRechecks() {
+        returnRecheckRunnables.values.forEach { mainHandler.removeCallbacks(it) }
+        returnRecheckRunnables.clear()
+        douyinReturnRecheckRunnables.forEach { mainHandler.removeCallbacks(it) }
+        douyinReturnRecheckRunnables.clear()
     }
 
     private fun runDouyinReturnRecheck(packageName: String, attempt: Int) {
@@ -888,7 +919,8 @@ class FocusAccessibilityService : AccessibilityService() {
         private const val REPEATED_SCROLL_WINDOW_MS = 45_000L
         private const val REPEATED_SCROLL_MIN_INTERVAL_MS = 650L
         private const val RETURN_RECHECK_DELAY_MS = 900L
-        private const val DOUYIN_RECHECK_TOKEN = "douyin_return_recheck"
+        private const val PERMISSION_HEALTH_CHECK_INTERVAL_MS = 10_000L
+        private const val PERMISSION_SERVICE_SETTLE_MS = 500L
         private val DOUYIN_RECHECK_DELAYS_MS = longArrayOf(300L, 800L, 1_500L, 2_500L)
         private val DOUYIN_STUDY_PAGE_STATES = setOf(
             DouyinPageState.DOUYIN_SEARCH_PAGE,

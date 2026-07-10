@@ -5,9 +5,11 @@ import android.content.Intent
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -16,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,7 +44,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,11 +56,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 open class MainActivity : ComponentActivity() {
     private lateinit var repository: GuardRepository
+    private var permissionRefreshVersion by mutableIntStateOf(0)
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        permissionRefreshVersion += 1
+        maybeStartStabilityService()
+        PermissionAlertCoordinator.evaluate(
+            this,
+            "notification_permission_result",
+            includeForegroundService = false
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,7 +87,7 @@ open class MainActivity : ComponentActivity() {
             AppSurface {
                 MainScreen(
                     repository = repository,
-                    accessibilityEnabled = PermissionUtils.isAccessibilityEnabled(this),
+                    accessibilityEnabled = permissionRefreshVersion.let { PermissionUtils.isAccessibilityEnabled(this) },
                     overlayEnabled = PermissionUtils.canDrawOverlays(this),
                     notificationEnabled = PermissionUtils.canPostNotifications(this),
                     batteryIgnored = PermissionUtils.isIgnoringBatteryOptimizations(this),
@@ -75,35 +99,27 @@ open class MainActivity : ComponentActivity() {
                 )
             }
         }
-        maybeStartStabilityService()
     }
 
     override fun onResume() {
         super.onResume()
-        setContent {
-            AppSurface {
-                MainScreen(
-                    repository = repository,
-                    accessibilityEnabled = PermissionUtils.isAccessibilityEnabled(this),
-                    overlayEnabled = PermissionUtils.canDrawOverlays(this),
-                    notificationEnabled = PermissionUtils.canPostNotifications(this),
-                    batteryIgnored = PermissionUtils.isIgnoringBatteryOptimizations(this),
-                    onOpenAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                    onOpenOverlay = { startActivity(PermissionUtils.overlaySettingsIntent(this)) },
-                    onOpenNotification = { requestNotificationPermission() },
-                    onOpenBattery = { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) },
-                    onOpenAppDetails = { startActivity(PermissionUtils.appDetailsIntent(this)) }
-                )
-            }
-        }
+        permissionRefreshVersion += 1
         maybeStartStabilityService()
+        lifecycleScope.launch {
+            delay(PERMISSION_SERVICE_SETTLE_MS)
+            PermissionAlertCoordinator.evaluate(this@MainActivity, "activity_resumed")
+            permissionRefreshVersion += 1
+        }
     }
 
     private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !PermissionUtils.hasPostNotificationsRuntimePermission(this)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            startActivity(PermissionUtils.appDetailsIntent(this))
+            startActivity(PermissionUtils.notificationSettingsIntent(this))
         }
     }
 
@@ -116,7 +132,7 @@ open class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val REQUEST_POST_NOTIFICATIONS = 2001
+        private const val PERMISSION_SERVICE_SETTLE_MS = 500L
     }
 }
 
@@ -207,6 +223,7 @@ private fun MainScreen(
     }
     var savedMessage by remember { mutableStateOf("") }
     var showTargetPicker by remember { mutableStateOf(false) }
+    var targetPickerRequestedAt by remember { mutableLongStateOf(0L) }
     var developerUnlocked by remember { mutableStateOf(false) }
     var showDeveloperPasswordDialog by remember { mutableStateOf(false) }
     var developerTapCount by remember { mutableStateOf(0) }
@@ -243,6 +260,7 @@ private fun MainScreen(
     if (showTargetPicker) {
         TargetAppPickerScreen(
             repository = repository,
+            requestedAtElapsedRealtime = targetPickerRequestedAt,
             onBack = {
                 selectedInstalledApps = repository.targetAppConfigs()
                     .filter { it.isEnabled }
@@ -297,6 +315,14 @@ private fun MainScreen(
             defaultExpanded = !hasTodayQuota,
             forceExpanded = permissionForceExpanded
         ) {
+        if (!notificationEnabled) {
+            Text(
+                "通知权限已关闭：系统会阻止普通权限提醒。此处红色状态与重新打开应用后的提示是主要降级路径；已有前台服务通知只会尽力更新，不能保证显示。",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
         if (!hasTodayQuota) {
             Text("今日额度未确认", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text("确认前请完成关键权限。", style = MaterialTheme.typography.bodySmall)
@@ -328,7 +354,11 @@ private fun MainScreen(
         ) {
         Text("当前限制应用数：$selectedCount")
         Button(
-            onClick = { showTargetPicker = true },
+            onClick = {
+                targetPickerRequestedAt = SystemClock.elapsedRealtime()
+                Log.i(SearchGateAppPickerLog.TAG, "picker entry clicked atElapsedRealtime=$targetPickerRequestedAt")
+                showTargetPicker = true
+            },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("选择限制应用")
@@ -465,7 +495,7 @@ private fun MainScreen(
             OutlinedButton(onClick = onOpenAppDetails, modifier = Modifier.fillMaxWidth()) {
                 Text("打开系统应用详情")
             }
-            Text("版本：v0.5.2", style = MaterialTheme.typography.bodySmall)
+            Text("版本：v0.5.3", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -473,9 +503,11 @@ private fun MainScreen(
 @Composable
 private fun TargetAppPickerScreen(
     repository: GuardRepository,
+    requestedAtElapsedRealtime: Long,
     onBack: () -> Unit
 ) {
-    var installedApps by remember { mutableStateOf(repository.installedLaunchableApps()) }
+    var installedApps by remember { mutableStateOf(repository.cachedInstalledLaunchableApps()) }
+    var isLoadingApps by remember { mutableStateOf(installedApps.isEmpty()) }
     var targetConfigs by remember { mutableStateOf(repository.targetAppConfigs()) }
     var selectedInstalledApps by remember {
         mutableStateOf(
@@ -489,44 +521,65 @@ private fun TargetAppPickerScreen(
     var message by remember { mutableStateOf("") }
 
     fun refreshFromRepository() {
-        installedApps = repository.installedLaunchableApps()
         targetConfigs = repository.targetAppConfigs()
         selectedInstalledApps = targetConfigs
             .filter { it.isEnabled }
             .associate { it.packageName to it.appName }
     }
 
-    val configsByPackage = targetConfigs.associateBy { it.packageName }
-    val installedByPackage = installedApps.associateBy { it.packageName }
-    val configuredRows = targetConfigs.map { config ->
-        installedByPackage[config.packageName] ?: InstalledAppInfo(
-            packageName = config.packageName,
-            appName = config.appName,
-            icon = null,
-            isSelected = config.isEnabled,
-            config = config
+    LaunchedEffect(Unit) {
+        val shellElapsedMs = SystemClock.elapsedRealtime() - requestedAtElapsedRealtime
+        Log.i(
+            SearchGateAppPickerLog.TAG,
+            "picker shell rendered elapsedMs=$shellElapsedMs cacheHit=${installedApps.isNotEmpty()} cachedCount=${installedApps.size}"
         )
-    }
-    val configuredPackages = configuredRows.map { it.packageName }.toSet()
-    val cleanQuery = appSearchQuery.trim()
-    val allRows = (configuredRows + installedApps.filter { it.packageName !in configuredPackages })
-        .distinctBy { it.packageName }
-        .filter { app ->
-            val config = configsByPackage[app.packageName] ?: app.config
-            val matchesQuery = cleanQuery.isEmpty() ||
-                app.appName.contains(cleanQuery, ignoreCase = true) ||
-                app.packageName.contains(cleanQuery, ignoreCase = true)
-            val matchesFilter = when (filterMode) {
-                "selected" -> selectedInstalledApps.containsKey(app.packageName) ||
-                    app.packageName in GuardRepository.DEFAULT_TARGET_PACKAGES
-                "user" -> config?.source == TargetAppSource.USER_ADDED ||
-                    (config == null && app.packageName !in GuardRepository.DEFAULT_TARGET_PACKAGES)
-                "builtIn" -> app.packageName in GuardRepository.DEFAULT_TARGET_PACKAGES ||
-                    config?.source == TargetAppSource.BUILT_IN
-                else -> true
-            }
-            matchesQuery && matchesFilter
+        isLoadingApps = installedApps.isEmpty()
+        val refreshedApps = withContext(Dispatchers.IO) {
+            repository.installedLaunchableApps()
         }
+        installedApps = refreshedApps
+        isLoadingApps = false
+        Log.i(
+            SearchGateAppPickerLog.TAG,
+            "picker first list shown elapsedMs=${SystemClock.elapsedRealtime() - requestedAtElapsedRealtime} count=${refreshedApps.size}"
+        )
+        delay(800L)
+        Log.i(SearchGateAppPickerLog.TAG, "icon cache summary ${repository.appIconCacheSummary()}")
+    }
+
+    val configsByPackage = remember(targetConfigs) { targetConfigs.associateBy { it.packageName } }
+    val cleanQuery = appSearchQuery.trim()
+    val allRows = remember(installedApps, targetConfigs, selectedInstalledApps, cleanQuery, filterMode) {
+        val installedByPackage = installedApps.associateBy { it.packageName }
+        val configuredRows = targetConfigs.map { config ->
+            installedByPackage[config.packageName] ?: InstalledAppInfo(
+                packageName = config.packageName,
+                appName = config.appName,
+                icon = null,
+                isSelected = config.isEnabled,
+                config = config
+            )
+        }
+        val configuredPackages = configuredRows.map { it.packageName }.toSet()
+        (configuredRows + installedApps.filter { it.packageName !in configuredPackages })
+            .distinctBy { it.packageName }
+            .filter { app ->
+                val config = configsByPackage[app.packageName] ?: app.config
+                val matchesQuery = cleanQuery.isEmpty() ||
+                    app.appName.contains(cleanQuery, ignoreCase = true) ||
+                    app.packageName.contains(cleanQuery, ignoreCase = true)
+                val matchesFilter = when (filterMode) {
+                    "selected" -> selectedInstalledApps.containsKey(app.packageName) ||
+                        app.packageName in GuardRepository.DEFAULT_TARGET_PACKAGES
+                    "user" -> config?.source == TargetAppSource.USER_ADDED ||
+                        (config == null && app.packageName !in GuardRepository.DEFAULT_TARGET_PACKAGES)
+                    "builtIn" -> app.packageName in GuardRepository.DEFAULT_TARGET_PACKAGES ||
+                        config?.source == TargetAppSource.BUILT_IN
+                    else -> true
+                }
+                matchesQuery && matchesFilter
+            }
+    }
     val canAddPackageFromSearch = cleanQuery.looksLikePackageName() &&
         cleanQuery != "com.example.focusgate" &&
         allRows.none { it.packageName == cleanQuery } &&
@@ -576,6 +629,15 @@ private fun TargetAppPickerScreen(
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            if (isLoadingApps) {
+                item(key = "installed-apps-loading") {
+                    Text(
+                        "正在读取已安装应用…",
+                        modifier = Modifier.padding(vertical = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
             items(allRows, key = { it.packageName }) { app ->
                 val config = configsByPackage[app.packageName] ?: app.config
                 val builtIn = config?.source == TargetAppSource.BUILT_IN ||
@@ -586,6 +648,7 @@ private fun TargetAppPickerScreen(
                 val lockedToday = config?.let { repository.isUserTargetLockedToday(it) } == true && checked
                 TargetAppPickerRow(
                     app = app.copy(config = config),
+                    repository = repository,
                     checked = checked,
                     enabled = !builtIn,
                     appType = appType,
@@ -629,42 +692,37 @@ private fun TargetAppPickerScreen(
             }
         }
         HorizontalDivider()
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            tonalElevation = 2.dp
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (message.isNotEmpty()) {
-                    Text(message, color = if (message.contains("不能") || message.contains("明天")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-                }
-                Row(
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (message.isNotEmpty()) {
+                Text(message, color = if (message.contains("不能") || message.contains("明天")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "已选 ${selectedInstalledApps.size}",
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        .weight(1f)
+                        .align(Alignment.CenterVertically),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Button(
+                    onClick = {
+                        val result = repository.saveInstalledAppSelections(selectedInstalledApps)
+                        refreshFromRepository()
+                        message = if (result.blockedLockedRemovals.isEmpty()) {
+                            "已保存"
+                        } else {
+                            "已保存，${result.blockedLockedRemovals.size} 个明天可取消"
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Text(
-                        "已选 ${selectedInstalledApps.size}",
-                        modifier = Modifier
-                            .weight(1f)
-                            .align(Alignment.CenterVertically),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Button(
-                        onClick = {
-                            val result = repository.saveInstalledAppSelections(selectedInstalledApps)
-                            refreshFromRepository()
-                            message = if (result.blockedLockedRemovals.isEmpty()) {
-                                "已保存"
-                            } else {
-                                "已保存，${result.blockedLockedRemovals.size} 个明天可取消"
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("保存")
-                    }
+                    Text("保存")
                 }
             }
         }
@@ -681,16 +739,18 @@ private fun TargetFilterButton(
     if (selected) {
         Button(
             onClick = onClick,
-            modifier = modifier.height(40.dp)
+            modifier = modifier.height(40.dp),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
         ) {
-            Text(title)
+            Text(title, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
         }
     } else {
         OutlinedButton(
             onClick = onClick,
-            modifier = modifier.height(40.dp)
+            modifier = modifier.height(40.dp),
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
         ) {
-            Text(title)
+            Text(title, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
         }
     }
 }
@@ -982,6 +1042,7 @@ private fun ThresholdRow(
 @Composable
 private fun TargetAppPickerRow(
     app: InstalledAppInfo,
+    repository: GuardRepository,
     checked: Boolean,
     enabled: Boolean,
     appType: TargetAppType,
@@ -994,7 +1055,7 @@ private fun TargetAppPickerRow(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        DrawableAppIcon(app.icon)
+        DrawableAppIcon(app.packageName, app.icon, repository)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -1042,7 +1103,15 @@ private fun TargetTag(text: String) {
 }
 
 @Composable
-private fun DrawableAppIcon(icon: Drawable?) {
+private fun DrawableAppIcon(packageName: String, initialIcon: Drawable?, repository: GuardRepository) {
+    var icon by remember(packageName, initialIcon) {
+        mutableStateOf(initialIcon ?: repository.cachedAppIcon(packageName))
+    }
+    LaunchedEffect(packageName) {
+        if (icon == null) {
+            icon = withContext(Dispatchers.IO) { repository.loadAppIcon(packageName) }
+        }
+    }
     val bitmap = remember(icon) {
         runCatching { icon?.toBitmap(width = 48, height = 48)?.asImageBitmap() }.getOrNull()
     }
