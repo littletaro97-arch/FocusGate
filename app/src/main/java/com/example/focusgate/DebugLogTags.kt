@@ -20,6 +20,18 @@ object SearchGateDevModeLog {
     const val TAG = "SearchGateDevModeDebug"
 }
 
+object SearchGateDevQuotaLog {
+    const val TAG = "SearchGateDevQuotaDebug"
+}
+
+object SearchGateQuotaPickerLog {
+    const val TAG = "SearchGateQuotaPickerDebug"
+}
+
+object SearchGateFloatVisualLog {
+    const val TAG = "SearchGateFloatVisualDebug"
+}
+
 object SearchGateTargetAppLockLog {
     const val TAG = "SearchGateTargetAppLockDebug"
 }

@@ -60,6 +60,9 @@ data class EntertainmentSessionStatus(
 class GuardRepository(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val developerSettings = DeveloperSettingsManager(
+        SharedPreferencesDeveloperSettingsStore(prefs)
+    )
     @Volatile private var installedAppMetadataCache: List<InstalledAppInfo> = emptyList()
     private val appIconCache = ConcurrentHashMap<String, android.graphics.drawable.Drawable>()
     private val appIconCacheHits = AtomicLong(0L)
@@ -156,9 +159,7 @@ class GuardRepository(context: Context) {
         targetAppConfigs().firstOrNull { it.packageName == packageName && it.isEnabled }
 
     fun canRemoveUserTarget(config: TargetAppConfig, currentDate: String = today()): Boolean {
-        if (config.source != TargetAppSource.USER_ADDED) return false
-        val canRemoveAfter = config.canRemoveAfterDate ?: return true
-        return currentDate >= canRemoveAfter
+        return TargetAppLockPolicy.canRemoveUserTarget(config, currentDate)
     }
 
     fun isUserTargetLockedToday(config: TargetAppConfig, currentDate: String = today()): Boolean =
@@ -274,7 +275,9 @@ class GuardRepository(context: Context) {
                 allowStudyLookup = previous?.allowStudyLookup ?: false,
                 allowEntertainment = previous?.allowEntertainment ?: true,
                 source = TargetAppSource.USER_ADDED
-            ).withDailyLockIfNewlyEnabled(previous, finalEnabled, todayDate, tomorrowDate)
+            ).let { config ->
+                TargetAppLockPolicy.applyDailyLock(config, previous, finalEnabled, todayDate, tomorrowDate)
+            }
         }.toSet()
         val enabledUserPackages = userConfigs.filter { it.isEnabled }.map { it.packageName }.toSet()
         val enabledTargets = builtInPackages + enabledUserPackages
@@ -604,9 +607,14 @@ class GuardRepository(context: Context) {
 
     fun confirmTodayEntertainmentPlan(dailyLimit: Int, durationMinutes: Int): Boolean {
         normalizeEntertainmentDate()
-        if (hasTodayEntertainmentPlan()) return false
-        val cleanLimit = dailyLimit.coerceIn(0, MAX_DAILY_ENTERTAINMENT_LIMIT)
-        val cleanDurationMs = durationMinutes.coerceIn(MIN_ENTERTAINMENT_MINUTES, MAX_ENTERTAINMENT_MINUTES) * 60_000L
+        if (!QuotaPolicy.canConfirmTodayQuota(hasTodayEntertainmentPlan())) return false
+        val selection = QuotaPolicy.sanitizeUserSelection(
+            dailyLimit,
+            durationMinutes,
+            developerQuotaLimits()
+        )
+        val cleanLimit = selection.entertainmentCount
+        val cleanDurationMs = selection.entertainmentDurationMillis
         prefs.edit()
             .putBoolean(KEY_DEFAULT_ENTERTAINMENT_CONFIGURED, true)
             .putInt(KEY_DEFAULT_ENTERTAINMENT_DAILY_LIMIT, cleanLimit)
@@ -625,15 +633,20 @@ class GuardRepository(context: Context) {
             .putLong(KEY_PROMPT_UPDATED_AT, System.currentTimeMillis())
             .apply()
         Log.i(
-            FocusGateLog.TAG,
-            "today quota confirmed date=${today()} todayLimit=$cleanLimit todayDurationMinutes=${cleanDurationMs / 60_000L} savedAsDefault=true"
+            SearchGateQuotaPickerLog.TAG,
+            "today quota confirmed date=${today()} count=$cleanLimit durationMinutes=${selection.entertainmentDurationMinutes} maxCount=${developerQuotaLimits().maxDailyEntertainmentCount} maxDurationMinutes=${developerQuotaLimits().maxEntertainmentDurationMinutes} savedAsDefault=true"
         )
         return true
     }
 
     fun saveDefaultEntertainmentSettings(dailyLimit: Int, durationMinutes: Int): Boolean {
-        val cleanLimit = dailyLimit.coerceIn(0, MAX_DAILY_ENTERTAINMENT_LIMIT)
-        val cleanDurationMs = durationMinutes.coerceIn(MIN_ENTERTAINMENT_MINUTES, MAX_ENTERTAINMENT_MINUTES) * 60_000L
+        val selection = QuotaPolicy.sanitizeUserSelection(
+            dailyLimit,
+            durationMinutes,
+            developerQuotaLimits()
+        )
+        val cleanLimit = selection.entertainmentCount
+        val cleanDurationMs = selection.entertainmentDurationMillis
         prefs.edit()
             .putBoolean(KEY_DEFAULT_ENTERTAINMENT_CONFIGURED, true)
             .putInt(KEY_DEFAULT_ENTERTAINMENT_DAILY_LIMIT, cleanLimit)
@@ -668,10 +681,49 @@ class GuardRepository(context: Context) {
         Log.i(SearchGateDevModeLog.TAG, "globalGuardEnabled=$enabled")
     }
 
+    fun isDeveloperModeEnabled(): Boolean {
+        val enabled = developerSettings.isDeveloperModeEnabled()
+        Log.i(SearchGateDevModeLog.TAG, "developerModeEnabled read=$enabled persisted=true")
+        return enabled
+    }
+
+    fun setDeveloperModeEnabled(enabled: Boolean) {
+        developerSettings.setDeveloperModeEnabled(enabled)
+        Log.i(
+            SearchGateDevModeLog.TAG,
+            "developerModeEnabled changed=$enabled reason=${if (enabled) "verified_entry" else "explicit_exit"} persisted=true"
+        )
+    }
+
+    fun developerQuotaLimits(): DeveloperQuotaLimits = developerSettings.quotaLimits()
+
+    fun updateDeveloperQuotaLimits(count: Int, durationMinutes: Int): DeveloperQuotaLimits {
+        val previous = developerQuotaLimits()
+        val updated = developerSettings.updateQuotaLimits(count, durationMinutes)
+        val defaultCount = defaultEntertainmentLimit()
+        val defaultDurationMinutes = (defaultEntertainmentDurationMs() / 60_000L).toInt()
+        Log.i(
+            SearchGateDevQuotaLog.TAG,
+            "quota limits changed previousCount=${previous.maxDailyEntertainmentCount} previousDurationMinutes=${previous.maxEntertainmentDurationMinutes} newCount=${updated.maxDailyEntertainmentCount} newDurationMinutes=${updated.maxEntertainmentDurationMinutes} historicalCountClamped=${defaultCount > updated.maxDailyEntertainmentCount} historicalDurationClamped=${defaultDurationMinutes > updated.maxEntertainmentDurationMinutes} modifiedToday=false"
+        )
+        return updated
+    }
+
+    fun restoreDefaultDeveloperQuotaLimits(): DeveloperQuotaLimits {
+        val previous = developerQuotaLimits()
+        val restored = developerSettings.restoreDefaultQuotaLimits()
+        Log.i(
+            SearchGateDevQuotaLog.TAG,
+            "quota limits restored previousCount=${previous.maxDailyEntertainmentCount} previousDurationMinutes=${previous.maxEntertainmentDurationMinutes} newCount=${restored.maxDailyEntertainmentCount} newDurationMinutes=${restored.maxEntertainmentDurationMinutes} modifiedToday=false"
+        )
+        return restored
+    }
+
     fun debugUpdateTodayQuota(dailyLimit: Int, usedCount: Int, durationMinutes: Int, clearConfirmation: Boolean) {
-        val cleanLimit = dailyLimit.coerceIn(0, MAX_DAILY_ENTERTAINMENT_LIMIT)
-        val cleanUsed = usedCount.coerceIn(0, MAX_DAILY_ENTERTAINMENT_LIMIT)
-        val cleanDurationMs = durationMinutes.coerceIn(MIN_ENTERTAINMENT_MINUTES, MAX_ENTERTAINMENT_MINUTES) * 60_000L
+        val selection = QuotaPolicy.sanitizeDeveloperTodaySelection(dailyLimit, durationMinutes)
+        val cleanLimit = selection.entertainmentCount
+        val cleanUsed = usedCount.coerceIn(0, cleanLimit)
+        val cleanDurationMs = selection.entertainmentDurationMillis
         val editor = prefs.edit()
             .putInt(KEY_DAILY_ENTERTAINMENT_COUNT, cleanUsed)
         if (clearConfirmation) {
@@ -774,31 +826,13 @@ class GuardRepository(context: Context) {
                     allowStudyLookup = false,
                     allowEntertainment = true,
                     source = TargetAppSource.USER_ADDED
-                ).withDailyLockIfNewlyEnabled(previous, enabled, todayDate, tomorrowDate)
+                ).let { config ->
+                    TargetAppLockPolicy.applyDailyLock(config, previous, enabled, todayDate, tomorrowDate)
+                }
             )
             .map { encodeTargetConfig(it) }
             .toSet()
         prefs.edit().putStringSet(KEY_USER_TARGET_CONFIGS, configs).apply()
-    }
-
-    private fun TargetAppConfig.withDailyLockIfNewlyEnabled(
-        previous: TargetAppConfig?,
-        finalEnabled: Boolean,
-        todayDate: String,
-        tomorrowDate: String
-    ): TargetAppConfig {
-        if (source != TargetAppSource.USER_ADDED) return this
-        return when {
-            finalEnabled && (previous == null || !previous.isEnabled) -> copy(
-                addedDate = todayDate,
-                canRemoveAfterDate = tomorrowDate
-            )
-            previous != null -> copy(
-                addedDate = previous.addedDate,
-                canRemoveAfterDate = previous.canRemoveAfterDate
-            )
-            else -> this
-        }
     }
 
     private fun encodeTargetConfig(config: TargetAppConfig): String =
@@ -1101,9 +1135,7 @@ class GuardRepository(context: Context) {
         const val SEARCH_RETURN_UNKNOWN_RECHECK_MS = 1_500L
         const val DEFAULT_ENTERTAINMENT_MS = 5 * 60_000L
         const val DEFAULT_DAILY_ENTERTAINMENT_LIMIT = 2
-        const val MIN_ENTERTAINMENT_MINUTES = 1
-        const val MAX_ENTERTAINMENT_MINUTES = 60
-        const val MAX_DAILY_ENTERTAINMENT_LIMIT = 10
+        const val MIN_ENTERTAINMENT_MINUTES = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES
 
         private const val PREFS_NAME = "focus_gate_guard"
         private const val KEY_TARGET_PACKAGES = "targetPackages"

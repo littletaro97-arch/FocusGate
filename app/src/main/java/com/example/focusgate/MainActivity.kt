@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.widget.NumberPicker
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
@@ -17,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -50,14 +52,20 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -222,23 +230,29 @@ private fun MainScreen(
         )
     }
     var savedMessage by remember { mutableStateOf("") }
-    var showTargetPicker by remember { mutableStateOf(false) }
+    var showTargetPicker by rememberSaveable { mutableStateOf(false) }
     var targetPickerRequestedAt by remember { mutableLongStateOf(0L) }
-    var developerUnlocked by remember { mutableStateOf(false) }
+    var developerModeEnabled by remember { mutableStateOf(repository.isDeveloperModeEnabled()) }
+    var developerQuotaLimits by remember { mutableStateOf(repository.developerQuotaLimits()) }
     var showDeveloperPasswordDialog by remember { mutableStateOf(false) }
     var developerTapCount by remember { mutableStateOf(0) }
     var firstDeveloperTapAt by remember { mutableStateOf(0L) }
     val state = repository.state()
     val hasTodayQuota = repository.hasTodayEntertainmentPlan()
-    var entertainmentDailyLimit by remember { mutableStateOf(if (hasTodayQuota) state.entertainmentDailyLimit else state.defaultEntertainmentDailyLimit) }
-    var entertainmentDurationMinutes by remember {
-        mutableStateOf(
-            if (hasTodayQuota) {
-                (state.entertainmentDurationMs / 60_000L).toInt()
-            } else {
-                (state.defaultEntertainmentDurationMs / 60_000L).toInt()
-            }
-        )
+    val initialQuotaSelection = QuotaPolicy.sanitizeUserSelection(
+        count = if (hasTodayQuota) state.entertainmentDailyLimit else state.defaultEntertainmentDailyLimit,
+        durationMinutes = if (hasTodayQuota) {
+            (state.entertainmentDurationMs / 60_000L).toInt()
+        } else {
+            (state.defaultEntertainmentDurationMs / 60_000L).toInt()
+        },
+        limits = developerQuotaLimits
+    )
+    var entertainmentDailyLimit by rememberSaveable {
+        mutableIntStateOf(initialQuotaSelection.entertainmentCount)
+    }
+    var entertainmentDurationMinutes by rememberSaveable {
+        mutableIntStateOf(initialQuotaSelection.entertainmentDurationMinutes)
     }
     var entertainmentMessage by remember { mutableStateOf("") }
     val hasTodayControlPlan = repository.hasTodayControlPlan()
@@ -247,11 +261,25 @@ private fun MainScreen(
     val permissionForceExpanded = !criticalPermissionsOk || !hasTodayQuota
     val selectedCount = selectedInstalledApps.size
 
+    LaunchedEffect(Unit) {
+        Log.i(
+            SearchGateQuotaPickerLog.TAG,
+            "quota draft initialized count=$entertainmentDailyLimit durationMinutes=$entertainmentDurationMinutes maxCount=${developerQuotaLimits.maxDailyEntertainmentCount} maxDurationMinutes=${developerQuotaLimits.maxEntertainmentDurationMinutes} historicalCountClamped=${initialQuotaSelection.entertainmentCount != state.defaultEntertainmentDailyLimit} historicalDurationClamped=${initialQuotaSelection.entertainmentDurationMillis != state.defaultEntertainmentDurationMs}"
+        )
+    }
+    LaunchedEffect(developerModeEnabled) {
+        Log.i(
+            SearchGateDevModeLog.TAG,
+            "developer mode badge visible=$developerModeEnabled screen=main"
+        )
+    }
+
     if (showDeveloperPasswordDialog) {
         DeveloperPasswordDialog(
             onDismiss = { showDeveloperPasswordDialog = false },
             onVerified = {
-                developerUnlocked = true
+                repository.setDeveloperModeEnabled(true)
+                developerModeEnabled = true
                 showDeveloperPasswordDialog = false
             }
         )
@@ -261,6 +289,7 @@ private fun MainScreen(
         TargetAppPickerScreen(
             repository = repository,
             requestedAtElapsedRealtime = targetPickerRequestedAt,
+            developerModeEnabled = developerModeEnabled,
             onBack = {
                 selectedInstalledApps = repository.targetAppConfigs()
                     .filter { it.isEnabled }
@@ -281,7 +310,8 @@ private fun MainScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 "FocusGate",
@@ -303,6 +333,9 @@ private fun MainScreen(
                     }
                 }
             )
+            if (developerModeEnabled) {
+                DeveloperModeBadge()
+            }
         }
 
         HorizontalDivider()
@@ -382,57 +415,81 @@ private fun MainScreen(
             defaultExpanded = true,
             forceExpanded = !hasTodayQuota
         ) {
-        Text("娱乐额度", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         if (!hasTodayQuota) {
-            ThresholdRow(
-                title = "今日允许娱乐次数",
+            QuotaSetupCard(title = "每日娱乐次数") {
+                QuotaWheelPicker(
                 value = entertainmentDailyLimit,
                 unit = "次",
-                enabled = true,
-                min = 0,
-                max = GuardRepository.MAX_DAILY_ENTERTAINMENT_LIMIT,
-                onChange = {
+                min = QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
+                max = developerQuotaLimits.maxDailyEntertainmentCount,
+                onValueChange = {
                     entertainmentDailyLimit = it
                     entertainmentMessage = ""
                 }
             )
-            ThresholdRow(
-                title = "今日单次娱乐时间",
+            }
+            QuotaSetupCard(title = "单次娱乐时间") {
+                QuotaWheelPicker(
                 value = entertainmentDurationMinutes,
                 unit = "分钟",
-                enabled = true,
-                min = GuardRepository.MIN_ENTERTAINMENT_MINUTES,
-                max = GuardRepository.MAX_ENTERTAINMENT_MINUTES,
-                onChange = {
+                min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
+                max = developerQuotaLimits.maxEntertainmentDurationMinutes,
+                onValueChange = {
                     entertainmentDurationMinutes = it
                     entertainmentMessage = ""
                 }
             )
-            Button(
-                onClick = {
-                    entertainmentMessage = if (repository.confirmTodayEntertainmentPlan(entertainmentDailyLimit, entertainmentDurationMinutes)) {
-                        val refreshed = repository.state()
-                        entertainmentDailyLimit = refreshed.entertainmentDailyLimit
-                        entertainmentDurationMinutes = (refreshed.entertainmentDurationMs / 60_000L).toInt()
-                        "今日额度已确认：每天 ${refreshed.entertainmentDailyLimit} 次，每次 ${refreshed.entertainmentDurationMs / 60_000L} 分钟"
-                    } else {
-                        "今日额度已经确认，不能再次修改"
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("确认今日额度")
             }
-            if (entertainmentMessage.isNotEmpty()) Text(entertainmentMessage)
+            QuotaSetupCard(title = "限制应用") {
+                Text("当前限制应用数：$selectedCount")
+                OutlinedButton(
+                    onClick = {
+                        targetPickerRequestedAt = SystemClock.elapsedRealtime()
+                        showTargetPicker = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("添加更多应用")
+                }
+            }
+            QuotaSetupCard(title = "确认") {
+                Text("确认后今日不可修改", style = MaterialTheme.typography.bodySmall)
+                Button(
+                    onClick = {
+                        entertainmentMessage = if (repository.confirmTodayEntertainmentPlan(entertainmentDailyLimit, entertainmentDurationMinutes)) {
+                            val refreshed = repository.state()
+                            entertainmentDailyLimit = refreshed.entertainmentDailyLimit
+                            entertainmentDurationMinutes = (refreshed.entertainmentDurationMs / 60_000L).toInt()
+                            "已确认：${refreshed.entertainmentDailyLimit} 次 / ${refreshed.entertainmentDurationMs / 60_000L} 分钟"
+                        } else {
+                            "今日额度已经确认，不能再次修改"
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("确认今日额度")
+                }
+                if (entertainmentMessage.isNotEmpty()) {
+                    Text(entertainmentMessage)
+                }
+            }
         } else {
-            Text("今日额度已锁定，今天不能再次修改。")
-            Text("今日允许：${state.entertainmentDailyLimit} 次，每次 ${state.entertainmentDurationMs / 60_000L} 分钟")
-            Text("今日已用：${state.dailyEntertainmentCount} 次，剩余 ${(state.entertainmentDailyLimit - state.dailyEntertainmentCount).coerceAtLeast(0)} 次")
-            Text(if (entertainmentActive) {
-                "娱乐倒计时进行中，剩余 ${(state.entertainmentUntil - System.currentTimeMillis()).coerceAtLeast(0L) / 60_000L + 1} 分钟"
-            } else {
-                "当前不处于娱乐倒计时"
-            })
+            QuotaSetupCard(title = "今日额度已锁定") {
+                Text("${state.entertainmentDailyLimit} 次 / ${state.entertainmentDurationMs / 60_000L} 分钟")
+                Text("已用 ${state.dailyEntertainmentCount} 次，剩余 ${(state.entertainmentDailyLimit - state.dailyEntertainmentCount).coerceAtLeast(0)} 次")
+                if (entertainmentActive) {
+                    Text("娱乐倒计时进行中")
+                }
+                OutlinedButton(
+                    onClick = {
+                        targetPickerRequestedAt = SystemClock.elapsedRealtime()
+                        showTargetPicker = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("添加更多应用")
+                }
+            }
         }
         }
 
@@ -463,7 +520,7 @@ private fun MainScreen(
         Text("前台服务：${if (criticalPermissionsOk) "可运行" else "权限异常"}")
         }
 
-        if (developerUnlocked) {
+        if (developerModeEnabled) {
             CollapsibleSection(
                 repository = repository,
                 moduleKey = "debug",
@@ -489,14 +546,124 @@ private fun MainScreen(
             defaultExpanded = false
         ) {
             GuardSettingsPanel(repository = repository)
-            if (developerUnlocked) {
-                DeveloperModePanel(repository = repository)
+            if (developerModeEnabled) {
+                DeveloperModePanel(
+                    repository = repository,
+                    limits = developerQuotaLimits,
+                    onLimitsChanged = { updated ->
+                        developerQuotaLimits = updated
+                        val clamped = QuotaPolicy.sanitizeUserSelection(
+                            entertainmentDailyLimit,
+                            entertainmentDurationMinutes,
+                            updated
+                        )
+                        entertainmentDailyLimit = clamped.entertainmentCount
+                        entertainmentDurationMinutes = clamped.entertainmentDurationMinutes
+                    },
+                    onExitDeveloperMode = {
+                        repository.setDeveloperModeEnabled(false)
+                        developerModeEnabled = false
+                    }
+                )
             }
             OutlinedButton(onClick = onOpenAppDetails, modifier = Modifier.fillMaxWidth()) {
                 Text("打开系统应用详情")
             }
-            Text("版本：v0.5.3", style = MaterialTheme.typography.bodySmall)
+            Text("版本：v0.5.4", style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+@Composable
+private fun DeveloperModeBadge() {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        shape = MaterialTheme.shapes.small
+    ) {
+        Text(
+            "开发者模式",
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+@Composable
+private fun QuotaSetupCard(
+    title: String,
+    content: @Composable () -> Unit
+) {
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        border = BorderStroke(1.dp, Color(0xFFE1E1D9))
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun QuotaWheelPicker(
+    value: Int,
+    unit: String,
+    min: Int,
+    max: Int,
+    onValueChange: (Int) -> Unit
+) {
+    val safeMax = max.coerceAtLeast(min)
+    val safeValue = value.coerceIn(min, safeMax)
+    val indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp)
+                .drawWithContent {
+                    drawContent()
+                    val halfBand = 22.dp.toPx()
+                    val centerY = size.height / 2f
+                    drawLine(indicatorColor, Offset(0f, centerY - halfBand), Offset(size.width, centerY - halfBand), 1.dp.toPx())
+                    drawLine(indicatorColor, Offset(0f, centerY + halfBand), Offset(size.width, centerY + halfBand), 1.dp.toPx())
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            AndroidView(
+                factory = { context ->
+                    NumberPicker(context).apply {
+                        descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
+                        wrapSelectorWheel = false
+                    }
+                },
+                update = { picker ->
+                    picker.setOnValueChangedListener(null)
+                    if (picker.minValue != min || picker.maxValue != safeMax) {
+                        picker.displayedValues = null
+                        picker.minValue = min
+                        picker.maxValue = safeMax
+                    }
+                    picker.setFormatter { item -> "$item $unit" }
+                    if (picker.value != safeValue) picker.value = safeValue
+                    picker.setOnValueChangedListener { _, _, newValue ->
+                        if (newValue != value) onValueChange(newValue)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        Text(
+            "当前：$safeValue $unit",
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }
 
@@ -504,6 +671,7 @@ private fun MainScreen(
 private fun TargetAppPickerScreen(
     repository: GuardRepository,
     requestedAtElapsedRealtime: Long,
+    developerModeEnabled: Boolean,
     onBack: () -> Unit
 ) {
     var installedApps by remember { mutableStateOf(repository.cachedInstalledLaunchableApps()) }
@@ -519,6 +687,13 @@ private fun TargetAppPickerScreen(
     var appSearchQuery by remember { mutableStateOf("") }
     var filterMode by remember { mutableStateOf("all") }
     var message by remember { mutableStateOf("") }
+
+    LaunchedEffect(developerModeEnabled) {
+        Log.i(
+            SearchGateDevModeLog.TAG,
+            "developer mode badge visible=$developerModeEnabled screen=target_picker"
+        )
+    }
 
     fun refreshFromRepository() {
         targetConfigs = repository.targetAppConfigs()
@@ -598,8 +773,13 @@ private fun TargetAppPickerScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text("选择限制应用", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                if (developerModeEnabled) DeveloperModeBadge()
             }
             TextButton(onClick = onBack) {
                 Text("返回")
@@ -804,7 +984,12 @@ private fun DeveloperPasswordDialog(
 }
 
 @Composable
-private fun DeveloperModePanel(repository: GuardRepository) {
+private fun DeveloperModePanel(
+    repository: GuardRepository,
+    limits: DeveloperQuotaLimits,
+    onLimitsChanged: (DeveloperQuotaLimits) -> Unit,
+    onExitDeveloperMode: () -> Unit
+) {
     var state by remember { mutableStateOf(repository.state()) }
     var globalGuardEnabled by remember { mutableStateOf(repository.isGlobalGuardEnabled()) }
     var dailyLimit by remember { mutableStateOf(state.entertainmentDailyLimit.coerceAtLeast(state.defaultEntertainmentDailyLimit)) }
@@ -815,6 +1000,12 @@ private fun DeveloperModePanel(repository: GuardRepository) {
         )
     }
     var message by remember { mutableStateOf("") }
+    var maxCountInput by remember(limits) {
+        mutableStateOf(limits.maxDailyEntertainmentCount.toString())
+    }
+    var maxDurationInput by remember(limits) {
+        mutableStateOf(limits.maxEntertainmentDurationMinutes.toString())
+    }
 
     fun refresh() {
         state = repository.state()
@@ -847,13 +1038,54 @@ private fun DeveloperModePanel(repository: GuardRepository) {
                 }
             )
         }
+        QuotaSetupCard(title = "额度上限") {
+            DeveloperNumberField(
+                label = "每日娱乐次数上限",
+                value = maxCountInput,
+                rangeHint = "1–${QuotaPolicy.DEVELOPER_MAX_DAILY_ENTERTAINMENT_COUNT}",
+                onValueChange = { maxCountInput = it.filter(Char::isDigit).take(3) }
+            )
+            DeveloperNumberField(
+                label = "单次娱乐时间上限（分钟）",
+                value = maxDurationInput,
+                rangeHint = "1–${QuotaPolicy.DEVELOPER_MAX_ENTERTAINMENT_DURATION_MINUTES}",
+                onValueChange = { maxDurationInput = it.filter(Char::isDigit).take(3) }
+            )
+            Button(
+                onClick = {
+                    val updated = repository.updateDeveloperQuotaLimits(
+                        maxCountInput.toIntOrNull() ?: limits.maxDailyEntertainmentCount,
+                        maxDurationInput.toIntOrNull() ?: limits.maxEntertainmentDurationMinutes
+                    )
+                    maxCountInput = updated.maxDailyEntertainmentCount.toString()
+                    maxDurationInput = updated.maxEntertainmentDurationMinutes.toString()
+                    onLimitsChanged(updated)
+                    message = "额度上限已保存"
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("保存额度上限")
+            }
+            OutlinedButton(
+                onClick = {
+                    val restored = repository.restoreDefaultDeveloperQuotaLimits()
+                    maxCountInput = restored.maxDailyEntertainmentCount.toString()
+                    maxDurationInput = restored.maxEntertainmentDurationMinutes.toString()
+                    onLimitsChanged(restored)
+                    message = "额度上限已恢复默认"
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("恢复默认值")
+            }
+        }
         ThresholdRow(
             title = "调试：今日次数上限",
             value = dailyLimit,
             unit = "次",
             enabled = true,
-            min = 0,
-            max = GuardRepository.MAX_DAILY_ENTERTAINMENT_LIMIT,
+            min = QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
+            max = QuotaPolicy.DEVELOPER_MAX_DAILY_ENTERTAINMENT_COUNT,
             onChange = { dailyLimit = it }
         )
         ThresholdRow(
@@ -862,7 +1094,7 @@ private fun DeveloperModePanel(repository: GuardRepository) {
             unit = "次",
             enabled = true,
             min = 0,
-            max = GuardRepository.MAX_DAILY_ENTERTAINMENT_LIMIT,
+            max = QuotaPolicy.DEVELOPER_MAX_DAILY_ENTERTAINMENT_COUNT,
             onChange = { usedCount = it }
         )
         ThresholdRow(
@@ -870,8 +1102,8 @@ private fun DeveloperModePanel(repository: GuardRepository) {
             value = durationMinutes,
             unit = "分钟",
             enabled = true,
-            min = GuardRepository.MIN_ENTERTAINMENT_MINUTES,
-            max = GuardRepository.MAX_ENTERTAINMENT_MINUTES,
+            min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
+            max = QuotaPolicy.DEVELOPER_MAX_ENTERTAINMENT_DURATION_MINUTES,
             onChange = { durationMinutes = it }
         )
         Button(
@@ -945,10 +1177,34 @@ private fun DeveloperModePanel(repository: GuardRepository) {
         ) {
             Text("调试：清空用户新增应用")
         }
+        OutlinedButton(
+            onClick = onExitDeveloperMode,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("退出开发者模式")
+        }
         if (message.isNotEmpty()) {
             Text(message)
         }
     }
+}
+
+@Composable
+private fun DeveloperNumberField(
+    label: String,
+    value: String,
+    rangeHint: String,
+    onValueChange: (String) -> Unit
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        supportingText = { Text("范围：$rangeHint") },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable

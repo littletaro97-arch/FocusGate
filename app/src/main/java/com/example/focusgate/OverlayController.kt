@@ -18,6 +18,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
+import android.widget.NumberPicker
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
@@ -62,7 +63,9 @@ class OverlayController(
         entertainmentHoldRunnable?.let { mainHandler.removeCallbacks(it) }
         entertainmentHoldRunnable = null
         entertainmentControlView?.let { view ->
+            (view as? EntertainmentEndCircleView)?.releaseVisualResources()
             runCatching { windowManager.removeView(view) }
+            Log.i(SearchGateFloatVisualLog.TAG, "floating control resources released")
         }
         entertainmentControlView = null
     }
@@ -149,21 +152,38 @@ class OverlayController(
         val availablePackages = repository.targetPackages().toList().sortedBy { displayName(it) }
         val selectedPackages = availablePackages.toMutableSet()
         val state = repository.state()
+        val developerLimits = repository.developerQuotaLimits()
         val quotaLocked = repository.hasTodayEntertainmentPlan()
-        var dailyLimit = if (quotaLocked) state.entertainmentDailyLimit else state.defaultEntertainmentDailyLimit
+        val initialSelection = QuotaPolicy.sanitizeUserSelection(
+            state.defaultEntertainmentDailyLimit,
+            (state.defaultEntertainmentDurationMs / 60_000L).toInt(),
+            developerLimits
+        )
+        var dailyLimit = if (quotaLocked) state.entertainmentDailyLimit else initialSelection.entertainmentCount
         var durationMinutes = if (quotaLocked) {
             (state.entertainmentDurationMs / 60_000L).toInt()
         } else {
-            (state.defaultEntertainmentDurationMs / 60_000L).toInt()
+            initialSelection.entertainmentDurationMinutes
         }
 
         val root = baseLayout()
-        val countText = body("")
-        val durationText = body("")
 
-        fun refresh() {
-            countText.text = "今天允许娱乐次数：$dailyLimit 次"
-            durationText.text = "每次娱乐时长：$durationMinutes 分钟"
+        fun wheel(
+            min: Int,
+            max: Int,
+            value: Int,
+            unit: String,
+            enabled: Boolean,
+            onChanged: (Int) -> Unit
+        ) = NumberPicker(service).apply {
+            minValue = min
+            maxValue = max.coerceAtLeast(min)
+            this.value = value.coerceIn(minValue, maxValue)
+            wrapSelectorWheel = false
+            descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
+            setFormatter { "$it $unit" }
+            isEnabled = enabled
+            setOnValueChangedListener { _, _, newValue -> onChanged(newValue) }
         }
 
         root.addView(title("设置今天的控制规则"))
@@ -191,30 +211,28 @@ class OverlayController(
         if (availablePackages.isEmpty()) {
             root.addView(body("当前没有配置检测应用。请回到 FocusGate 主界面添加。"))
         }
-        val decreaseCountButton = secondaryButton("-1 次") {
-                dailyLimit = (dailyLimit - 1).coerceAtLeast(0)
-                refresh()
-            }
-        val increaseCountButton = secondaryButton("+1 次") {
-                dailyLimit = (dailyLimit + 1).coerceAtMost(GuardRepository.MAX_DAILY_ENTERTAINMENT_LIMIT)
-                refresh()
-            }
-        decreaseCountButton.isEnabled = !quotaLocked
-        increaseCountButton.isEnabled = !quotaLocked
-        root.addView(countText)
-        root.addView(horizontalButtons(decreaseCountButton, increaseCountButton))
-        root.addView(durationText)
-        val decreaseDurationButton = secondaryButton("-5 分钟") {
-                durationMinutes = (durationMinutes - 5).coerceAtLeast(GuardRepository.MIN_ENTERTAINMENT_MINUTES)
-                refresh()
-            }
-        val increaseDurationButton = secondaryButton("+5 分钟") {
-                durationMinutes = (durationMinutes + 5).coerceAtMost(GuardRepository.MAX_ENTERTAINMENT_MINUTES)
-                refresh()
-            }
-        decreaseDurationButton.isEnabled = !quotaLocked
-        increaseDurationButton.isEnabled = !quotaLocked
-        root.addView(horizontalButtons(decreaseDurationButton, increaseDurationButton))
+        root.addView(body("每日娱乐次数"))
+        root.addView(
+            wheel(
+                min = if (quotaLocked) minOf(QuotaPolicy.MIN_ENTERTAINMENT_COUNT, dailyLimit) else QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
+                max = if (quotaLocked) maxOf(developerLimits.maxDailyEntertainmentCount, dailyLimit) else developerLimits.maxDailyEntertainmentCount,
+                value = dailyLimit,
+                unit = "次",
+                enabled = !quotaLocked,
+                onChanged = { dailyLimit = it }
+            )
+        )
+        root.addView(body("单次娱乐时间"))
+        root.addView(
+            wheel(
+                min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
+                max = if (quotaLocked) maxOf(developerLimits.maxEntertainmentDurationMinutes, durationMinutes) else developerLimits.maxEntertainmentDurationMinutes,
+                value = durationMinutes,
+                unit = "分钟",
+                enabled = !quotaLocked,
+                onChanged = { durationMinutes = it }
+            )
+        )
         root.addView(primaryButton("确认今天规则") {
             repository.setTodayControlledPackages(selectedPackages)
             if (!quotaLocked) {
@@ -230,14 +248,13 @@ class OverlayController(
             service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
         })
 
-        refresh()
         add(root, targetPackage)
     }
 
     fun showEntertainmentControl(targetPackage: String, remainingMs: Long) {
         if (!Settings.canDrawOverlays(service) || isShowing() || entertainmentControlView != null) return
 
-        val circleSize = dp(60)
+        val circleSize = dp(FLOAT_TOUCH_SIZE_DP)
         val screenWidth = service.resources.displayMetrics.widthPixels
         val screenHeight = service.resources.displayMetrics.heightPixels
         val edgeMargin = dp(8)
@@ -320,9 +337,10 @@ class OverlayController(
             entertainmentHoldRunnable = null
             pressStartedAt = 0L
             circle.clearHoldProgress()
-            circle.animate().scaleX(1f).scaleY(1f).setDuration(120L).start()
+            circle.animateVisualScale(1f, HOLD_SCALE_ANIMATION_MS)
             if (reason != null) {
                 Log.i(SearchGateFloatPerfLog.TAG, "long press cancelled reason=$reason state=$interactionState")
+                Log.i(SearchGateFloatVisualLog.TAG, "long press cancelled reason=$reason")
             }
         }
 
@@ -340,9 +358,11 @@ class OverlayController(
             entertainmentHoldRunnable?.let { mainHandler.removeCallbacks(it) }
             entertainmentHoldRunnable = null
             circle.setHoldProgress(1f)
+            circle.animateVisualScale(HOLD_COMPLETE_SCALE, 80L)
             Toast.makeText(service, "已结束娱乐", Toast.LENGTH_SHORT).show()
             Log.i(FocusGateLog.TAG, "entertainment control action=long_press_end target=$targetPackage")
             Log.i(SearchGateFloatPerfLog.TAG, "long press triggered end target=$targetPackage")
+            Log.i(SearchGateFloatVisualLog.TAG, "long press completed target=$targetPackage")
             repository.endEntertainment(PromptFlowState.ENTERTAINMENT_ENDED_BY_USER, targetPackage)
             circle.animate().alpha(0f).setDuration(100L).withEndAction {
                 dismissEntertainmentControl()
@@ -356,7 +376,8 @@ class OverlayController(
                 if (triggered || dragging || interactionState != FloatingEndState.PRESSING || pressStartedAt == 0L) return@Runnable
                 interactionState = FloatingEndState.LONG_PRESS_PROGRESS
                 Log.i(SearchGateFloatPerfLog.TAG, "long press progress started target=$targetPackage")
-                circle.animate().scaleX(1.12f).scaleY(1.12f).setDuration(120L).start()
+                Log.i(SearchGateFloatVisualLog.TAG, "long press started scale=$HOLD_VISUAL_SCALE")
+                circle.animateVisualScale(HOLD_VISUAL_SCALE, HOLD_SCALE_ANIMATION_MS)
                 val progressRunnable = object : Runnable {
                     override fun run() {
                         if (triggered || dragging || pressStartedAt == 0L) return
@@ -468,6 +489,10 @@ class OverlayController(
             windowManager.addView(circle, params)
             entertainmentControlView = circle
             Log.i(FocusGateLog.TAG, "entertainment control circle shown target=$targetPackage remainingMs=$remainingMs x=${params.x} y=${params.y}")
+            Log.i(
+                SearchGateFloatVisualLog.TAG,
+                "floating control created windowDp=$FLOAT_TOUCH_SIZE_DP bodyDp=$FLOAT_BODY_DIAMETER_DP ringStrokeDp=$FLOAT_RING_STROKE_DP holdScale=$HOLD_VISUAL_SCALE transparentRoot=true"
+            )
         }.onFailure {
             Log.w(FocusGateLog.TAG, "show entertainment control failed: ${it.javaClass.simpleName}")
         }
@@ -602,5 +627,11 @@ class OverlayController(
         private const val HOLD_PROGRESS_START_DELAY_MS = 160L
         private const val ENTERTAINMENT_HINT_DEBOUNCE_MS = 1_000L
         private const val FLOAT_UPDATE_WARN_NS = 8_000_000L
+        private const val FLOAT_TOUCH_SIZE_DP = 68
+        private const val FLOAT_BODY_DIAMETER_DP = 48
+        private const val FLOAT_RING_STROKE_DP = 3
+        private const val HOLD_VISUAL_SCALE = 1.18f
+        private const val HOLD_COMPLETE_SCALE = 0.94f
+        private const val HOLD_SCALE_ANIMATION_MS = 110L
     }
 }

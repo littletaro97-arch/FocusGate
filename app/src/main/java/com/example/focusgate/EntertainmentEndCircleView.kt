@@ -1,17 +1,26 @@
 package com.example.focusgate
 
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.Rect
+import android.graphics.Shader
 import android.view.View
+import android.view.animation.DecelerateInterpolator
+import kotlin.math.min
 
 class EntertainmentEndCircleView(context: Context) : View(context) {
     var accessibleClickAction: (() -> Unit)? = null
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(205, 32, 37, 41)
+    private val density = resources.displayMetrics.density
+    private val bodyRadius = 24f * density
+    private val ringRadius = 27f * density
+    private val shadowRadius = 4f * density
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
         style = Paint.Style.FILL
+        setShadowLayer(shadowRadius, 0f, density, Color.argb(105, 0, 0, 0))
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -34,6 +43,13 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
     private val textBounds = Rect()
     private var progress = 0f
     private var holding = false
+    private var visualScale = 1f
+    private var scaleAnimator: ValueAnimator? = null
+
+    init {
+        setBackgroundColor(Color.TRANSPARENT)
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
+    }
 
     fun setHoldProgress(value: Float) {
         progress = value.coerceIn(0f, 1f)
@@ -47,6 +63,26 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun animateVisualScale(targetScale: Float, durationMs: Long) {
+        val cleanTarget = targetScale.coerceIn(0.9f, 1.18f)
+        scaleAnimator?.cancel()
+        scaleAnimator = ValueAnimator.ofFloat(visualScale, cleanTarget).apply {
+            duration = durationMs
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                visualScale = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
+
+    fun releaseVisualResources() {
+        scaleAnimator?.cancel()
+        scaleAnimator = null
+        fillPaint.shader = null
+    }
+
     override fun performClick(): Boolean {
         super.performClick()
         accessibleClickAction?.invoke()
@@ -55,17 +91,34 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val size = width.coerceAtMost(height).toFloat()
-        val center = size / 2f
-        val radius = center - ringBackPaint.strokeWidth - 1f
-        canvas.drawCircle(center, center, radius, fillPaint)
+        val centerX = width / 2f
+        val centerY = height / 2f
+        if (fillPaint.shader == null) {
+            fillPaint.shader = RadialGradient(
+                centerX - bodyRadius * 0.22f,
+                centerY - bodyRadius * 0.28f,
+                bodyRadius * 1.45f,
+                intArrayOf(
+                    Color.argb(218, 73, 78, 82),
+                    Color.argb(222, 31, 35, 39)
+                ),
+                floatArrayOf(0f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        val outerRadius = ringRadius + ringPaint.strokeWidth / 2f
+        val maxSafeScale = ((min(width, height) / 2f) - density) / outerRadius
+        val safeScale = min(visualScale, maxSafeScale)
+        canvas.save()
+        canvas.scale(safeScale, safeScale, centerX, centerY)
+        canvas.drawCircle(centerX, centerY, bodyRadius, fillPaint)
         if (holding) {
-            canvas.drawCircle(center, center, radius, ringBackPaint)
+            canvas.drawCircle(centerX, centerY, ringRadius, ringBackPaint)
             canvas.drawArc(
-                center - radius,
-                center - radius,
-                center + radius,
-                center + radius,
+                centerX - ringRadius,
+                centerY - ringRadius,
+                centerX + ringRadius,
+                centerY + ringRadius,
                 -90f,
                 progress * 360f,
                 false,
@@ -74,6 +127,12 @@ class EntertainmentEndCircleView(context: Context) : View(context) {
         }
         val text = "结束"
         textPaint.getTextBounds(text, 0, text.length, textBounds)
-        canvas.drawText(text, center, center - textBounds.exactCenterY(), textPaint)
+        canvas.drawText(text, centerX, centerY - textBounds.exactCenterY(), textPaint)
+        canvas.restore()
+    }
+
+    override fun onDetachedFromWindow() {
+        releaseVisualResources()
+        super.onDetachedFromWindow()
     }
 }
