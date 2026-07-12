@@ -234,6 +234,7 @@ private fun MainScreen(
     var targetPickerRequestedAt by remember { mutableLongStateOf(0L) }
     var developerModeEnabled by remember { mutableStateOf(repository.isDeveloperModeEnabled()) }
     var developerQuotaLimits by remember { mutableStateOf(repository.developerQuotaLimits()) }
+    var showDeveloperCenter by rememberSaveable { mutableStateOf(false) }
     var showDeveloperPasswordDialog by remember { mutableStateOf(false) }
     var developerTapCount by remember { mutableStateOf(0) }
     var firstDeveloperTapAt by remember { mutableStateOf(0L) }
@@ -300,6 +301,29 @@ private fun MainScreen(
         return
     }
 
+    if (showDeveloperCenter && developerModeEnabled) {
+        DeveloperCenterScreen(
+            repository = repository,
+            accessibilityEnabled = accessibilityEnabled,
+            overlayEnabled = overlayEnabled,
+            notificationEnabled = notificationEnabled,
+            onBack = {
+                developerQuotaLimits = repository.developerQuotaLimits()
+                showDeveloperCenter = false
+            },
+            onExit = {
+                repository.setDeveloperModeEnabled(false)
+                developerModeEnabled = false
+                showDeveloperCenter = false
+            },
+            onOpenAppDetails = onOpenAppDetails,
+            onOpenAccessibility = onOpenAccessibility,
+            onOpenOverlay = onOpenOverlay,
+            onOpenNotification = onOpenNotification
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -334,7 +358,7 @@ private fun MainScreen(
                 }
             )
             if (developerModeEnabled) {
-                DeveloperModeBadge()
+                DeveloperModeBadge(onClick = { showDeveloperCenter = true })
             }
         }
 
@@ -416,29 +440,42 @@ private fun MainScreen(
             forceExpanded = !hasTodayQuota
         ) {
         if (!hasTodayQuota) {
-            QuotaSetupCard(title = "每日娱乐次数") {
-                QuotaWheelPicker(
-                value = entertainmentDailyLimit,
-                unit = "次",
-                min = QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
-                max = developerQuotaLimits.maxDailyEntertainmentCount,
-                onValueChange = {
-                    entertainmentDailyLimit = it
-                    entertainmentMessage = ""
+            QuotaSetupCard(title = "娱乐额度") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CompactQuotaColumn(
+                        title = "每日次数",
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        QuotaWheelPicker(
+                            value = entertainmentDailyLimit,
+                            unit = "次",
+                            min = QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
+                            max = developerQuotaLimits.maxDailyEntertainmentCount,
+                            onValueChange = {
+                                entertainmentDailyLimit = it
+                                entertainmentMessage = ""
+                            }
+                        )
+                    }
+                    CompactQuotaColumn(
+                        title = "单次时间",
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        QuotaWheelPicker(
+                            value = entertainmentDurationMinutes,
+                            unit = "分钟",
+                            min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
+                            max = developerQuotaLimits.maxEntertainmentDurationMinutes,
+                            onValueChange = {
+                                entertainmentDurationMinutes = it
+                                entertainmentMessage = ""
+                            }
+                        )
+                    }
                 }
-            )
-            }
-            QuotaSetupCard(title = "单次娱乐时间") {
-                QuotaWheelPicker(
-                value = entertainmentDurationMinutes,
-                unit = "分钟",
-                min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
-                max = developerQuotaLimits.maxEntertainmentDurationMinutes,
-                onValueChange = {
-                    entertainmentDurationMinutes = it
-                    entertainmentMessage = ""
-                }
-            )
             }
             QuotaSetupCard(title = "限制应用") {
                 Text("当前限制应用数：$selectedCount")
@@ -520,24 +557,6 @@ private fun MainScreen(
         Text("前台服务：${if (criticalPermissionsOk) "可运行" else "权限异常"}")
         }
 
-        if (developerModeEnabled) {
-            CollapsibleSection(
-                repository = repository,
-                moduleKey = "debug",
-                title = "调试日志",
-                summary = "最近状态机和跳转判断",
-                defaultExpanded = false
-            ) {
-                Text("当前状态机：${state.promptFlowState}")
-                Text("状态包名：${state.promptPackage ?: "-"}")
-                Text("搜索流程：${state.searchSessionPackage ?: "-"} / ${state.lastDeepLinkResult}")
-                Text("返回复查：${state.searchReturnCheckPackage ?: "-"}，until=${state.searchReturnCheckUntil}")
-                Text("最近关键词：${state.lastKeyword ?: "-"}")
-                Text("Bilibili 日志 Tag：SearchGateBiliDebug")
-                Text("抖音日志 Tag：SearchGateDouyinDebug")
-            }
-        }
-
         CollapsibleSection(
             repository = repository,
             moduleKey = "advanced",
@@ -546,36 +565,16 @@ private fun MainScreen(
             defaultExpanded = false
         ) {
             GuardSettingsPanel(repository = repository)
-            if (developerModeEnabled) {
-                DeveloperModePanel(
-                    repository = repository,
-                    limits = developerQuotaLimits,
-                    onLimitsChanged = { updated ->
-                        developerQuotaLimits = updated
-                        val clamped = QuotaPolicy.sanitizeUserSelection(
-                            entertainmentDailyLimit,
-                            entertainmentDurationMinutes,
-                            updated
-                        )
-                        entertainmentDailyLimit = clamped.entertainmentCount
-                        entertainmentDurationMinutes = clamped.entertainmentDurationMinutes
-                    },
-                    onExitDeveloperMode = {
-                        repository.setDeveloperModeEnabled(false)
-                        developerModeEnabled = false
-                    }
-                )
-            }
             OutlinedButton(onClick = onOpenAppDetails, modifier = Modifier.fillMaxWidth()) {
                 Text("打开系统应用详情")
             }
-            Text("版本：v0.5.4", style = MaterialTheme.typography.bodySmall)
+            Text("版本：v0.6.0", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
 @Composable
-private fun DeveloperModeBadge() {
+private fun DeveloperModeBadge(onClick: () -> Unit = {}) {
     Surface(
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -583,11 +582,29 @@ private fun DeveloperModeBadge() {
     ) {
         Text(
             "开发者模式",
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            modifier = Modifier
+                .clickable(onClick = onClick)
+                .padding(horizontal = 8.dp, vertical = 3.dp),
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
             softWrap = false
         )
+    }
+}
+
+@Composable
+private fun CompactQuotaColumn(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        content()
     }
 }
 
@@ -621,14 +638,14 @@ private fun QuotaWheelPicker(
     val safeMax = max.coerceAtLeast(min)
     val safeValue = value.coerceIn(min, safeMax)
     val indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(120.dp)
+                .height(104.dp)
                 .drawWithContent {
                     drawContent()
-                    val halfBand = 22.dp.toPx()
+                    val halfBand = 18.dp.toPx()
                     val centerY = size.height / 2f
                     drawLine(indicatorColor, Offset(0f, centerY - halfBand), Offset(size.width, centerY - halfBand), 1.dp.toPx())
                     drawLine(indicatorColor, Offset(0f, centerY + halfBand), Offset(size.width, centerY + halfBand), 1.dp.toPx())
@@ -637,9 +654,15 @@ private fun QuotaWheelPicker(
         ) {
             AndroidView(
                 factory = { context ->
-                    NumberPicker(context).apply {
+                    GuardedNumberPicker(context).apply {
                         descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
                         wrapSelectorWheel = false
+                        onDraggingChanged = { dragging ->
+                            if (BuildConfig.DEBUG) Log.d(SearchGateQuotaPickerLog.TAG, "picker dragging=$dragging")
+                        }
+                        onGestureResolved = { owner ->
+                            if (BuildConfig.DEBUG) Log.d(SearchGateQuotaPickerLog.TAG, "gesture owner=$owner")
+                        }
                     }
                 },
                 update = { picker ->
@@ -654,14 +677,19 @@ private fun QuotaWheelPicker(
                     picker.setOnValueChangedListener { _, _, newValue ->
                         if (newValue != value) onValueChange(newValue)
                     }
+                    picker.setOnScrollListener { _, scrollState ->
+                        if (scrollState == NumberPicker.OnScrollListener.SCROLL_STATE_IDLE) {
+                            Log.i(SearchGateQuotaPickerLog.TAG, "picker settled value=${picker.value} unit=$unit")
+                        }
+                    }
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
             )
         }
         Text(
-            "当前：$safeValue $unit",
+            "$safeValue $unit",
             modifier = Modifier.align(Alignment.CenterHorizontally),
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold
         )
     }

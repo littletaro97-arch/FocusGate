@@ -32,6 +32,10 @@ object SearchGateFloatVisualLog {
     const val TAG = "SearchGateFloatVisualDebug"
 }
 
+object SearchGateDeveloperCenterLog {
+    const val TAG = "SearchGateDeveloperCenter"
+}
+
 object SearchGateTargetAppLockLog {
     const val TAG = "SearchGateTargetAppLockDebug"
 }
