@@ -4,10 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
 import android.view.Choreographer
@@ -16,11 +18,12 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.NumberPicker
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.widget.NestedScrollView
 import kotlin.math.abs
 
 private enum class FloatingEndState {
@@ -166,7 +169,8 @@ class OverlayController(
             initialSelection.entertainmentDurationMinutes
         }
 
-        val root = baseLayout()
+        val layout = dailyPlanLayout()
+        val content = layout.content
 
         fun wheel(
             min: Int,
@@ -175,45 +179,114 @@ class OverlayController(
             unit: String,
             enabled: Boolean,
             onChanged: (Int) -> Unit
-        ) = NumberPicker(service).apply {
+        ) = GuardedNumberPicker(service).apply {
             minValue = min
             maxValue = max.coerceAtLeast(min)
             this.value = value.coerceIn(minValue, maxValue)
             wrapSelectorWheel = false
             descendantFocusability = NumberPicker.FOCUS_BLOCK_DESCENDANTS
-            setFormatter { "$it $unit" }
+            setFormatter { "$it" }
             isEnabled = enabled
             setOnValueChangedListener { _, _, newValue -> onChanged(newValue) }
+            onDraggingChanged = { dragging ->
+                if (BuildConfig.DEBUG) {
+                    Log.d(SearchGateQuotaPickerLog.TAG, "daily-plan picker dragging=$dragging unit=$unit")
+                }
+            }
+            onGestureResolved = { owner ->
+                if (BuildConfig.DEBUG) {
+                    Log.d(SearchGateQuotaPickerLog.TAG, "daily-plan picker gesture=$owner unit=$unit")
+                }
+            }
         }
 
-        root.addView(title("设置今天的控制规则"))
-        root.addView(body(if (quotaLocked) {
-            "今天的娱乐额度已经确认，只能选择今天要控制的应用。"
-        } else {
-            "第一次打开 $platformName 前先确认今天的控制应用和娱乐额度。今天确认后不能再次修改。"
-        }))
-        availablePackages.forEach { packageName ->
-            root.addView(CheckBox(service).apply {
-                text = "${displayName(packageName)}\n$packageName"
-                textSize = 16f
-                setTextColor(Color.rgb(25, 31, 36))
-                isChecked = selectedPackages.contains(packageName)
-                setPadding(0, dp(4), 0, dp(4))
-                setOnCheckedChangeListener { _, isChecked ->
-                    if (isChecked) {
-                        selectedPackages.add(packageName)
-                    } else {
-                        selectedPackages.remove(packageName)
-                    }
-                }
-            })
-        }
+        content.addView(dailyPlanHeader(quotaLocked), sectionParams())
+
+        val appsCard = dailyPlanCard()
+        appsCard.addView(sectionTitle("受控制的应用", "已选择 ${selectedPackages.size} 个"))
         if (availablePackages.isEmpty()) {
-            root.addView(body("当前没有配置检测应用。请回到 FocusGate 主界面添加。"))
+            appsCard.addView(sectionBody("当前没有配置检测应用。请回到 FocusGate 主界面添加。"))
+        } else {
+            val chipFlow = CompactChipFlowLayout(service).apply {
+                setPadding(0, dp(4), 0, dp(4))
+            }
+            availablePackages.forEach { packageName ->
+                val chip = dailyPlanChip(displayName(packageName))
+                fun refreshChip() {
+                    val selected = selectedPackages.contains(packageName)
+                    chip.isSelected = selected
+                    chip.background = chipBackground(selected)
+                    chip.setTextColor(if (selected) Color.WHITE else Color.rgb(42, 47, 55))
+                    chip.contentDescription = "${displayName(packageName)}，${if (selected) "已选择" else "未选择"}"
+                }
+                chip.setOnClickListener {
+                    if (selectedPackages.contains(packageName)) {
+                        selectedPackages.remove(packageName)
+                    } else {
+                        selectedPackages.add(packageName)
+                    }
+                    refreshChip()
+                }
+                refreshChip()
+                chipFlow.addView(chip)
+            }
+            appsCard.addView(
+                BoundedNestedScrollView(service).apply {
+                    maxViewportHeightPx = dp(DailyPlanOverlayLayoutPolicy.SELECTED_APP_MAX_HEIGHT_DP)
+                    isFillViewport = false
+                    isNestedScrollingEnabled = true
+                    overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    addView(chipFlow, FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT
+                    ))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(6) }
+            )
         }
-        root.addView(body("每日娱乐次数"))
-        root.addView(
-            wheel(
+        content.addView(appsCard, sectionParams())
+
+        val quotaCard = dailyPlanCard()
+        quotaCard.addView(sectionTitle("今日额度"))
+        val wheels = LinearLayout(service).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        fun addWheelColumn(title: String, unit: String, picker: GuardedNumberPicker) {
+            val column = LinearLayout(service).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(TextView(service).apply {
+                    text = "$title（$unit）"
+                    textSize = 14f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.rgb(42, 47, 55))
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    gravity = Gravity.CENTER
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+                addView(picker, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(DailyPlanOverlayLayoutPolicy.QUOTA_WHEEL_HEIGHT_DP)
+                ).apply { topMargin = dp(4) })
+            }
+            if (wheels.childCount > 0) {
+                wheels.addView(View(service).apply { setBackgroundColor(Color.rgb(224, 224, 216)) }, LinearLayout.LayoutParams(dp(1), dp(96)).apply {
+                    setMargins(dp(6), dp(12), dp(6), dp(4))
+                })
+            }
+            wheels.addView(column, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        addWheelColumn(
+            title = "每日娱乐次数",
+            unit = "次",
+            picker = wheel(
                 min = if (quotaLocked) minOf(QuotaPolicy.MIN_ENTERTAINMENT_COUNT, dailyLimit) else QuotaPolicy.MIN_ENTERTAINMENT_COUNT,
                 max = if (quotaLocked) maxOf(developerLimits.maxDailyEntertainmentCount, dailyLimit) else developerLimits.maxDailyEntertainmentCount,
                 value = dailyLimit,
@@ -222,9 +295,10 @@ class OverlayController(
                 onChanged = { dailyLimit = it }
             )
         )
-        root.addView(body("单次娱乐时间"))
-        root.addView(
-            wheel(
+        addWheelColumn(
+            title = "单次娱乐时间",
+            unit = "分钟",
+            picker = wheel(
                 min = QuotaPolicy.MIN_ENTERTAINMENT_DURATION_MINUTES,
                 max = if (quotaLocked) maxOf(developerLimits.maxEntertainmentDurationMinutes, durationMinutes) else developerLimits.maxEntertainmentDurationMinutes,
                 value = durationMinutes,
@@ -233,7 +307,13 @@ class OverlayController(
                 onChanged = { durationMinutes = it }
             )
         )
-        root.addView(primaryButton("确认今天规则") {
+        quotaCard.addView(wheels, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(4) })
+        content.addView(quotaCard, sectionParams())
+
+        layout.bottomBar.addView(primaryButton("确认今天规则") {
             repository.setTodayControlledPackages(selectedPackages)
             if (!quotaLocked) {
                 repository.confirmTodayEntertainmentPlan(dailyLimit, durationMinutes)
@@ -243,12 +323,12 @@ class OverlayController(
                 showIntercept(targetPackage, PageKind.UNKNOWN)
             }
         })
-        root.addView(secondaryButton("返回桌面") {
+        layout.bottomBar.addView(secondaryButton("返回桌面") {
             dismiss()
             service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
         })
 
-        add(root, targetPackage)
+        add(layout.root, targetPackage, avoidSystemBars = true)
     }
 
     fun showEntertainmentControl(targetPackage: String, remainingMs: Long) {
@@ -525,7 +605,140 @@ class OverlayController(
         add(root, targetPackage)
     }
 
-    private fun add(view: View, targetPackage: String) {
+    private data class DailyPlanLayout(
+        val root: FrameLayout,
+        val content: LinearLayout,
+        val bottomBar: LinearLayout
+    )
+
+    private fun dailyPlanLayout(): DailyPlanLayout {
+        val root = FrameLayout(service).apply {
+            setBackgroundColor(Color.rgb(247, 247, 242))
+            clipToPadding = false
+        }
+        val scroll = NestedScrollView(service).apply {
+            isFillViewport = true
+            isNestedScrollingEnabled = true
+            clipToPadding = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        }
+        val content = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(DailyPlanOverlayLayoutPolicy.MIN_BOTTOM_BAR_CLEARANCE_DP))
+        }
+        scroll.addView(content, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ))
+        root.addView(scroll, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+
+        val bottomBar = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(6), dp(20), dp(8))
+            elevation = dp(8).toFloat()
+            background = roundedBackground(Color.rgb(247, 247, 242), Color.rgb(225, 225, 218))
+        }
+        root.addView(bottomBar, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM
+        ))
+
+        var topInset = 0
+        fun updateContentPadding() {
+            val bottomClearance = maxOf(
+                dp(DailyPlanOverlayLayoutPolicy.MIN_BOTTOM_BAR_CLEARANCE_DP),
+                bottomBar.height + dp(12)
+            )
+            content.setPadding(dp(20), dp(16) + topInset, dp(20), bottomClearance)
+        }
+        bottomBar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateContentPadding() }
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            topInset = insets.systemWindowInsetTop
+            val bottomInset = insets.systemWindowInsetBottom
+            bottomBar.setPadding(dp(20), dp(6), dp(20), dp(8) + bottomInset)
+            updateContentPadding()
+            insets
+        }
+        return DailyPlanLayout(root, content, bottomBar)
+    }
+
+    private fun dailyPlanHeader(quotaLocked: Boolean): LinearLayout = dailyPlanCard().apply {
+        addView(sectionTitle("设置今日规则"))
+        addView(sectionBody(if (quotaLocked) "额度已确认，可调整控制应用" else "选择应用与娱乐额度"), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(2) })
+    }
+
+    private fun dailyPlanCard(): LinearLayout = LinearLayout(service).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(14), dp(12), dp(14), dp(12))
+        background = roundedBackground(Color.WHITE, Color.rgb(225, 225, 218))
+    }
+
+    private fun sectionParams(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+    ).apply { bottomMargin = dp(12) }
+
+    private fun sectionTitle(title: String, trailing: String? = null): LinearLayout = LinearLayout(service).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(service).apply {
+            text = title
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(25, 31, 36))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        if (trailing != null) {
+            addView(TextView(service).apply {
+                text = trailing
+                textSize = 13f
+                setTextColor(Color.rgb(88, 94, 102))
+                maxLines = 1
+            })
+        }
+    }
+
+    private fun sectionBody(text: String): TextView = TextView(service).apply {
+        this.text = text
+        textSize = 14f
+        setTextColor(Color.rgb(88, 94, 102))
+        maxLines = 2
+        ellipsize = TextUtils.TruncateAt.END
+    }
+
+    private fun dailyPlanChip(text: String): TextView = TextView(service).apply {
+        this.text = text
+        textSize = 14f
+        setPadding(dp(12), dp(7), dp(12), dp(7))
+        maxWidth = dp(220)
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+    }
+
+    private fun chipBackground(selected: Boolean): GradientDrawable = roundedBackground(
+        color = if (selected) Color.rgb(73, 61, 235) else Color.rgb(239, 239, 234),
+        strokeColor = if (selected) Color.rgb(73, 61, 235) else Color.rgb(218, 218, 211)
+    ).apply { cornerRadius = dp(18).toFloat() }
+
+    private fun roundedBackground(color: Int, strokeColor: Int? = null): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(16).toFloat()
+        setColor(color)
+        if (strokeColor != null) setStroke(dp(1), strokeColor)
+    }
+
+    private fun add(view: View, targetPackage: String, avoidSystemBars: Boolean = false) {
         view.isFocusable = true
         view.isFocusableInTouchMode = true
         view.setOnKeyListener { _, keyCode, event ->
@@ -543,7 +756,7 @@ class OverlayController(
             WindowManager.LayoutParams.MATCH_PARENT,
             type,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                if (avoidSystemBars) 0 else WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             android.graphics.PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER

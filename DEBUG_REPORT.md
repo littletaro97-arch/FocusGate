@@ -364,3 +364,86 @@ APK：
 - Release unsigned SHA256：`55531939D47CA826A6546B0032AA201DD6A537C4565CA8FCCAC48B4D0C2FF6FE`
 
 ---
+
+# SearchGate Debug Report - v0.6.3 Daily Plan Overlay Height Fix
+
+日期：2026-07-13
+
+## 设置今日额度页面严重布局问题
+
+### 截图观察与精确代码定位
+
+- 应用列表无限向下铺开：截图对应 `OverlayController.showDailyEntertainmentPlanSetup()`。原实现为每个目标应用直接 `root.addView(CheckBox)`，并显示“应用名 + 换行 + 包名”；没有应用容器上限。
+- 顶部说明被挤压：标题、长说明、全部应用、两组说明与滚轮都被连续插入同一个 `baseLayout()`。
+- 两个滚轮裁切或重叠：`baseLayout()` 是 `gravity = CENTER` 的普通纵向 `LinearLayout`，没有外层滚动；两个原生 `NumberPicker` 纵向连续加入，窗口高度不足时没有独立最小可操作视口。
+- 确认按钮被推到屏外：确认与返回按钮同样是普通纵列末尾子项，没有固定操作区和内容底部预留。
+- 安全区不足：日计划悬浮窗沿用 `FLAG_LAYOUT_NO_LIMITS`，没有专用 WindowInsets 处理。
+- 该截图**不是** Compose 首页 `MainActivity` 的问题，而是无障碍服务悬浮窗的 View 路径。
+
+### 修改后的页面层级
+
+```text
+FrameLayout（安全区适配）
+├── 外层 NestedScrollView
+│   └── 内容 LinearLayout
+│       ├── 顶部提示卡
+│       ├── 受控制的应用卡：限高内部滚动的 ChipFlow
+│       └── 今日额度卡：同一行的两个 GuardedNumberPicker
+└── 固定底部操作栏：确认今天规则 + 返回桌面
+```
+
+## 已选应用模块
+
+- 大模块：圆角轻量卡片，标题为“受控制的应用”，显示当前选中数量。
+- 小模块：`CompactChipFlowLayout` 生成只显示应用名称的单行 Chip；不显示包名、路径、类型说明或内部信息。超长名称省略，最大宽度 220dp。
+- 选择逻辑保留：点击 Chip 仍切换今天的受控应用集合；`confirmTodayEntertainmentPlan`、`setTodayControlledPackages`、当天额度锁和新增 App 次日可取消规则未改动。
+- 最大高度：`DailyPlanOverlayLayoutPolicy.SELECTED_APP_MAX_HEIGHT_DP = 180`。内容不足时 `BoundedNestedScrollView` 按内容高度显示；超过上限时仅该模块内部滚动。
+- 嵌套滚动：外层和内部均使用 `NestedScrollView`，内部启用 nested scrolling；内层滚到边缘后由嵌套滚动机制交还外层。
+
+## 双滚轮布局
+
+- 横向布局：同一“今日额度”卡片的 `LinearLayout.HORIZONTAL`，两个子列以相同 weight 平分可用宽度，中间使用窄分隔线。
+- 每个滚轮高度：112dp；标题和单位固定在各自子列顶部，滚轮项只显示数字，避免每项重复单位。
+- 触摸：日计划悬浮窗从普通 `NumberPicker` 改为既有 `GuardedNumberPicker`。中央起手区、touchSlop、纵向归滚轮、横向/非交互起手归页面、ACTION_UP/ACTION_CANCEL 释放父级拦截规则均保留。
+- 两个滚轮各自独立；不在滚轮滚动时写入 Repository，仍只在“确认今天规则”后生成当天快照。
+
+## 顶部提示与底部确认
+
+- 原结构：悬空标题加长说明文字。
+- 新结构：紧凑标题卡，仅保留“设置今日规则”和一行副标题；当天额度已锁定时显示“额度已确认，可调整控制应用”。
+- 固定底栏：`FrameLayout` 底部承载确认和返回操作，确认按钮不属于滚动内容。
+- 安全区与内容预留：日计划悬浮窗不再使用 `FLAG_LAYOUT_NO_LIMITS`；WindowInsets 更新顶部与导航栏内边距，滚动内容按底栏**实际测量高度**加间距预留空间，没有写死设备屏幕高度。
+
+## 自动验证与构建
+
+- `:app:compileDebugKotlin`：通过。
+- `:app:testDebugUnitTest`：27 项通过，0 失败；新增标签区高度上限、内部滚动阈值、双滚轮槽位和底栏空间测试。
+- `:app:lintDebug`：通过，0 error、9 warning（既有依赖更新、SDK/本地化建议）。
+- `:app:assembleDebug`：通过。
+- `:app:assembleRelease`：通过，产物为 unsigned APK。
+- 本轮未连接 adb、未启动模拟器、未进行真机或远程设备测试。
+
+## APK
+
+- Debug：`app/build/outputs/apk/debug/app-debug.apk`
+- Debug SHA256：`5AD222CF1B480819A167E70CB19B357D3194AB5C028269D868B9BA719A58096C`
+- Release unsigned：`app/build/outputs/apk/release/app-release-unsigned.apk`
+- Release SHA256：`BB3DE4CE0B8E11E889A1EFEE52DACE3E349F76DF85F4E84FE291A6DEBF474B75`
+
+## 用户自行真机验证
+
+1. 分别选择 1、5、10 和 20 个以上应用，确认应用区域不会无限增高。
+2. 在应用区域内滑动，确认超过两到四行后内部可滚；滑到边缘后外层页面可继续滚动。
+3. 确认 Chip 只显示名称，超长名称省略而不越界。
+4. 确认两个滚轮同一行、均完整显示；操作左侧不会改动右侧。
+5. 从滚轮中央纵向滑动时页面不跟随；在滚轮外滑动页面时数值不改变。
+6. 检查底部“确认今天规则”始终可见，且不被手势导航栏、三键导航栏或软键盘遮挡。
+7. 在字体放大、小屏、挖孔屏/水滴屏和横屏下检查文字、Chip 和滚轮是否裁切。
+8. 确认当天额度确认后仍不可再次修改，今日新增应用仍要到下一本地日期才能取消。
+
+## 剩余风险
+
+- 大量 Chip 的内部与外层嵌套滚动手感需要真实触控验证。
+- 220dp 超长名称上限、系统字体放大和极窄屏幕可能需要后续视觉微调。
+- 两个并排滚轮在不同 OEM NumberPicker 实现、WindowInsets 策略和导航模式下仍需人工回归。
+- Release APK 未签名，不能作为正式公开分发包。

@@ -91,4 +91,26 @@ class UiNavigationTest {
         val expandedAgain = ModuleExpansionPolicy.update(collapsed, "targets", true)
         assertTrue(expandedAgain.getValue("targets"))
     }
+
+    @Test
+    fun dailyPlanSelectedAppsGrowOnlyUntilTheirViewportCap() {
+        assertEquals(84, DailyPlanOverlayLayoutPolicy.selectedAppsViewportHeightDp(84))
+        assertEquals(
+            DailyPlanOverlayLayoutPolicy.SELECTED_APP_MAX_HEIGHT_DP,
+            DailyPlanOverlayLayoutPolicy.selectedAppsViewportHeightDp(480)
+        )
+        assertFalse(DailyPlanOverlayLayoutPolicy.selectedAppsNeedInternalScroll(180))
+        assertTrue(DailyPlanOverlayLayoutPolicy.selectedAppsNeedInternalScroll(181))
+    }
+
+    @Test
+    fun dailyPlanKeepsTwoCompactWheelSlotsAndBottomClearance() {
+        assertEquals(2, DailyPlanOverlayLayoutPolicy.QUOTA_COLUMN_COUNT)
+        assertTrue(DailyPlanOverlayLayoutPolicy.QUOTA_WHEEL_HEIGHT_DP in 100..130)
+        assertEquals(
+            DailyPlanOverlayLayoutPolicy.MIN_BOTTOM_BAR_CLEARANCE_DP,
+            DailyPlanOverlayLayoutPolicy.contentBottomClearanceDp(80)
+        )
+        assertEquals(220, DailyPlanOverlayLayoutPolicy.contentBottomClearanceDp(220))
+    }
 }
