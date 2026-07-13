@@ -44,6 +44,10 @@ object SearchGateMotionLog {
     const val TAG = "SearchGateMotionDebug"
 }
 
+object SearchGateCollapsePerfLog {
+    const val TAG = "SearchGateCollapsePerf"
+}
+
 object SearchGateTargetAppLockLog {
     const val TAG = "SearchGateTargetAppLockDebug"
 }

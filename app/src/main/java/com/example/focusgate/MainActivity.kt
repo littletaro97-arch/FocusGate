@@ -14,17 +14,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -187,7 +182,7 @@ private fun CollapsibleSection(
     val borderColor = if (forceExpanded) MaterialTheme.colorScheme.error else Color(0xFFD8D8CF)
     val arrowRotation by animateFloatAsState(
         targetValue = if (shownExpanded) 180f else 0f,
-        animationSpec = tween(FocusGateMotion.SHORT_MS),
+        animationSpec = tween(FocusGateMotion.ARROW_MS),
         label = "module-arrow-$moduleKey"
     )
 
@@ -196,8 +191,7 @@ private fun CollapsibleSection(
         border = BorderStroke(1.dp, borderColor)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(16.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -214,6 +208,7 @@ private fun CollapsibleSection(
                     onClick = {
                         if (!forceExpanded) {
                             Log.d(SearchGateMotionLog.TAG, "module ${if (expanded) "collapse" else "expand"} start id=$moduleKey")
+                            Log.i(SearchGateCollapsePerfLog.TAG, "module=$moduleKey targetExpanded=${!expanded} persistence=true cleanup=false")
                             onExpandedChange(!expanded)
                         }
                     },
@@ -225,16 +220,11 @@ private fun CollapsibleSection(
                     }
                 }
             }
-            AnimatedVisibility(
+            SmoothCollapsibleContent(
                 visible = shownExpanded,
-                enter = expandVertically(tween(FocusGateMotion.MEDIUM_MS)) +
-                    fadeIn(tween(FocusGateMotion.SHORT_MS)) +
-                    slideInVertically(tween(FocusGateMotion.MEDIUM_MS)) { -it / 12 },
-                exit = shrinkVertically(tween(FocusGateMotion.MEDIUM_MS)) +
-                    fadeOut(tween(FocusGateMotion.SHORT_MS)) +
-                    slideOutVertically(tween(FocusGateMotion.MEDIUM_MS)) { -it / 12 }
+                contentSpacing = 10.dp
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
+                content()
             }
         }
     }
@@ -321,7 +311,7 @@ private fun MainScreen(
     }
 
     fun setHomeModuleExpanded(moduleId: String, expanded: Boolean) {
-        moduleExpanded = moduleExpanded + (moduleId to expanded)
+        moduleExpanded = ModuleExpansionPolicy.update(moduleExpanded, moduleId, expanded)
         repository.setModuleExpanded(moduleId, expanded)
         homeExpandedHistory = if (expanded) {
             UiBackStateResolver.recordExpanded(homeExpandedHistory, moduleId)

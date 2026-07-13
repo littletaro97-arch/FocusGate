@@ -69,5 +69,26 @@ class UiNavigationTest {
         assertTrue(FocusGateMotion.PAGE_MS in 200..320)
         assertTrue(FocusGateMotion.SHORT_MS < FocusGateMotion.MEDIUM_MS)
         assertTrue(FocusGateMotion.MEDIUM_MS < FocusGateMotion.PAGE_MS)
+        assertEquals(240, FocusGateMotion.EXPAND_MS)
+        assertEquals(200, FocusGateMotion.COLLAPSE_MS)
+        assertEquals(200, FocusGateMotion.ARROW_MS)
+        assertTrue(FocusGateMotion.FADE_OUT_MS <= FocusGateMotion.COLLAPSE_MS)
+    }
+
+    @Test
+    fun collapsingOnlyChangesTargetModule() {
+        val initial = mapOf("targets" to true, "quota" to true, "advanced" to false)
+        val updated = ModuleExpansionPolicy.update(initial, "quota", false)
+        assertTrue(updated.getValue("targets"))
+        assertFalse(updated.getValue("quota"))
+        assertFalse(updated.getValue("advanced"))
+    }
+
+    @Test
+    fun rapidReversalEndsAtLatestRequestedState() {
+        val initial = mapOf("targets" to true)
+        val collapsed = ModuleExpansionPolicy.update(initial, "targets", false)
+        val expandedAgain = ModuleExpansionPolicy.update(collapsed, "targets", true)
+        assertTrue(expandedAgain.getValue("targets"))
     }
 }

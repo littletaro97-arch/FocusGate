@@ -330,3 +330,37 @@ APK：
 - `.gitignore` 已覆盖 local.properties、构建目录、APK、captures 和 IDE 缓存；本轮 diff 未加入 token、私钥、日志样本或新的个人绝对路径。
 
 ---
+# SearchGate Debug Report - v0.6.2 Smooth Collapse Tail
+
+日期：2026-07-13
+
+## 根因
+
+- 首页 CollapsibleSection 外层 Column 使用 `spacedBy(10.dp)`，开发者卡片外层使用 `spacedBy(9.dp)`；标题行和 AnimatedVisibility 是两个子项。
+- 收起过程中 AnimatedVisibility 高度平滑降为 0，但父 Column 的固定子项间距仍存在；退出动画结束、内容真正离开组合时，该 9–10dp 间距才瞬间移除，形成稳定可复现的末帧二次高度跳变。
+- 项目不存在 animateContentSize 与 shrinkVertically 的高度动画叠加；没有 spring、finishedListener、LaunchedEffect(expanded)、末尾数据清空或自动滚动。
+- 模块持久化使用 SharedPreferences.apply()，不是同步 commit；它不等待动画完成，也不是末尾卡顿根因。
+
+## 修复
+
+- 新增公共 SmoothCollapsibleContent，首页和开发者中心共用同一 AnimatedVisibility。
+- 外层标题容器不再使用固定 spacedBy；标题—内容间距移动到 AnimatedVisibility 内部，间距与内容一起从完整高度连续收缩到 0。
+- 同一高度只由 expandVertically/shrinkVertically 控制；删除首页折叠内容额外的 slideIn/slideOut，保留不参与布局的淡入淡出。
+- 展开 240ms、收起 200ms、箭头 200ms、淡出 160ms，均使用确定时长 tween；fadeOut 不长于高度收起。
+- 内存展开状态仍先更新，持久化随后调用异步 apply；业务逻辑不等待动画完成。
+
+## 自动验证
+
+- testDebugUnitTest：25 项通过，0 失败。
+- assembleDebug：通过。
+- lintDebug：通过，0 error、9 warning。
+- assembleRelease：通过；产物为 unsigned APK。
+- 新增目标模块隔离和快速反向最终状态测试；既有返回优先级、开发者持久化、额度和应用锁测试继续通过。
+- 本轮未连接设备、未启动 adb、未进行真机或模拟人工测试。
+
+## APK
+
+- Debug SHA256：`27056E08862546BDEBE2547E6558F71799CC9D8412726E38F10F58A77A5C3A3B`
+- Release unsigned SHA256：`55531939D47CA826A6546B0032AA201DD6A537C4565CA8FCCAC48B4D0C2FF6FE`
+
+---

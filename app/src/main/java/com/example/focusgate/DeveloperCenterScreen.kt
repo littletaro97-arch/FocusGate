@@ -1,13 +1,8 @@
 package com.example.focusgate
 
 import android.util.Log
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -271,11 +266,11 @@ private fun DeveloperCard(
 ) {
     val arrowRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(FocusGateMotion.SHORT_MS),
+        animationSpec = tween(FocusGateMotion.ARROW_MS),
         label = "developer-arrow-$id"
     )
     OutlinedCard(modifier = Modifier.fillMaxWidth(), border = BorderStroke(1.dp, Color(0xFFE1E1D9))) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -284,18 +279,18 @@ private fun DeveloperCard(
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 TextButton(onClick = {
                     Log.d(SearchGateMotionLog.TAG, "developer section ${if (expanded) "collapse" else "expand"} start id=$id")
+                    Log.i(SearchGateCollapsePerfLog.TAG, "module=$id targetExpanded=${!expanded} persistence=false cleanup=false")
                     onExpandedChange(id, !expanded)
                 }) {
                     Text(if (expanded) "收起" else "展开")
                     Text("⌄", modifier = Modifier.rotate(arrowRotation))
                 }
             }
-            AnimatedVisibility(
+            SmoothCollapsibleContent(
                 visible = expanded,
-                enter = expandVertically(tween(FocusGateMotion.MEDIUM_MS)) + fadeIn(tween(FocusGateMotion.SHORT_MS)),
-                exit = shrinkVertically(tween(FocusGateMotion.MEDIUM_MS)) + fadeOut(tween(FocusGateMotion.SHORT_MS))
+                contentSpacing = 9.dp
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) { content() }
+                content()
             }
         }
     }

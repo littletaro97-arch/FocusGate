@@ -43,8 +43,18 @@ object UiBackStateResolver {
         history.filterNot { it == moduleId }
 }
 
+object ModuleExpansionPolicy {
+    fun update(current: Map<String, Boolean>, moduleId: String, expanded: Boolean): Map<String, Boolean> =
+        current + (moduleId to expanded)
+}
+
 object FocusGateMotion {
     const val SHORT_MS = 160
     const val MEDIUM_MS = 220
     const val PAGE_MS = 260
+    const val EXPAND_MS = 240
+    const val COLLAPSE_MS = 200
+    const val ARROW_MS = 200
+    const val FADE_IN_MS = 180
+    const val FADE_OUT_MS = 160
 }
