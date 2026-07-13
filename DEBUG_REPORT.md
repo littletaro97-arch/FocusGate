@@ -290,3 +290,43 @@ APK：
 - NumberPicker 吸附、快速滑动、双滚轮互不干扰，以及应用选择返回后的临时值保留。
 
 ---
+# SearchGate Debug Report - v0.6.1 Back Navigation and Motion
+
+日期：2026-07-13
+
+## 返回逻辑
+
+- 新增可单元测试的 UiBackStateResolver，统一优先级为：弹层、编辑态、最近展开模块、二级页面、根页面退出。
+- 系统返回与页面软件返回按钮共用同一个 handleBack，不再分别修改页面布尔状态。
+- 首页保留多模块展开能力，并维护最近展开历史；每次返回只收起一个最近模块。
+- 强制展开的权限、未确认额度和娱乐状态模块不会被返回动作伪收起。
+- 开发者中心返回先收起最近的状态/功能分组，再回首页；不会关闭 developerModeEnabled。
+- 应用选择页搜索框聚焦时，第一次返回只清焦点和键盘；下一次才放弃未保存选择并回来源页，不自动保存。
+
+## 动画
+
+- 统一常量：短动画 160ms、模块动画 220ms、页面动画 260ms。
+- 首页及开发者中心全部可折叠卡片使用 AnimatedVisibility 的高度和透明度过渡，并同步旋转展开箭头。
+- HOME 与二级页使用 AnimatedContent 的轻量水平位移和淡入淡出；返回方向与进入方向相反。
+- 业务状态在动画开始前更新，不依赖动画结束回调，不执行 IO、图标加载或逐帧日志。
+- 未引入实验性预测性返回 API；继续使用 OnBackPressedDispatcher/BackHandler，保证系统返回手势逻辑一致，不提供完整预测性视觉预览。
+
+## 自动验证
+
+- testDebugUnitTest：23 项通过，0 失败。
+- assembleDebug：通过。
+- lintDebug：通过，0 error、9 warning。
+- assembleRelease：通过；产物为 unsigned APK。
+- 本轮未连接设备、未启动 adb、未进行真机或模拟人工操作。
+
+## APK
+
+- Debug SHA256：`9DC200781709CD709E387C416D5AE35CEC29FAE5E6C5F7EC99F44F7BAB66CA06`
+- Release unsigned SHA256：`B8F901BA32947E9DEECA11E40EEF3BC4ECFFBD4FCB0636EB56FABEA0E5230B4C`
+
+## 公开仓库风险
+
+- 发行版开发者入口继续使用项目原有硬编码固定密钥；该值已经存在于公开历史中，不是安全边界。本轮按约束未删除或改造，但正式公开发行前应迁移为更安全的授权机制。
+- `.gitignore` 已覆盖 local.properties、构建目录、APK、captures 和 IDE 缓存；本轮 diff 未加入 token、私钥、日志样本或新的个人绝对路径。
+
+---

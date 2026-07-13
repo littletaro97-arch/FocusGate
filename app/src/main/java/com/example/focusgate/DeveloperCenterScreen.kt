@@ -1,6 +1,13 @@
 package com.example.focusgate
 
 import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -31,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.time.LocalDate
@@ -41,6 +49,8 @@ fun DeveloperCenterScreen(
     accessibilityEnabled: Boolean,
     overlayEnabled: Boolean,
     notificationEnabled: Boolean,
+    expandedSections: Set<String>,
+    onSectionExpandedChange: (String, Boolean) -> Unit,
     onBack: () -> Unit,
     onExit: () -> Unit,
     onOpenAppDetails: () -> Unit,
@@ -119,7 +129,7 @@ fun DeveloperCenterScreen(
             TextButton(onClick = onBack) { Text("返回") }
         }
         Text("状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        DeveloperStatusCard("基础状态") {
+        DeveloperStatusCard("status_basic", "基础状态", expandedSections, onSectionExpandedChange) {
             StatusLine("开发者模式", if (snapshot.developerModeEnabled) "已开启" else "已关闭")
             StatusLine("总限制", if (snapshot.globalGuardEnabled) "启用" else "暂停")
             StatusLine("前台服务", if (notificationEnabled) "可运行" else "通知权限异常")
@@ -129,7 +139,7 @@ fun DeveloperCenterScreen(
             StatusLine("日期", today)
             StatusLine("版本", "${BuildConfig.VERSION_NAME} / ${if (BuildConfig.DEBUG) "Debug" else "Release"}")
         }
-        DeveloperStatusCard("今日额度") {
+        DeveloperStatusCard("status_quota", "今日额度", expandedSections, onSectionExpandedChange) {
             StatusLine("确认状态", if (snapshot.todayQuotaConfirmed) "已确认" else "未确认")
             StatusLine("已使用", "${snapshot.usedCount} / ${snapshot.dailyLimit} 次")
             StatusLine("剩余次数", "${snapshot.remainingCount} 次")
@@ -138,7 +148,7 @@ fun DeveloperCenterScreen(
             StatusLine("开始时间戳", snapshot.entertainmentStartedAt.takeIf { it > 0L }?.toString() ?: "-")
             StatusLine("结束时间戳", snapshot.entertainmentUntil.takeIf { it > 0L }?.toString() ?: "-")
         }
-        DeveloperStatusCard("识别与应用") {
+        DeveloperStatusCard("status_recognition", "识别与应用", expandedSections, onSectionExpandedChange) {
             StatusLine("当前前台应用", snapshot.currentAppName ?: "未记录")
             StatusLine("当前包名", snapshot.lastTargetPackage ?: "-")
             StatusLine("目标应用类型", snapshot.currentAppType ?: "-")
@@ -161,7 +171,7 @@ fun DeveloperCenterScreen(
 
         HorizontalDivider()
         Text("功能调整", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        DeveloperActionCard("开关") {
+        DeveloperActionCard("actions_switches", "开关", expandedSections, onSectionExpandedChange) {
             DeveloperSwitchRow(
                 title = "总限制开关",
                 subtitle = "立即控制限制逻辑",
@@ -174,7 +184,7 @@ fun DeveloperCenterScreen(
                 }
             )
         }
-        DeveloperActionCard("额度") {
+        DeveloperActionCard("actions_quota", "额度", expandedSections, onSectionExpandedChange) {
             ImmediateNumberRow("每日娱乐次数上限", snapshot.limits.maxDailyEntertainmentCount, "次", QuotaPolicy.MIN_ENTERTAINMENT_COUNT, QuotaPolicy.DEVELOPER_MAX_DAILY_ENTERTAINMENT_COUNT) { value ->
                 runOperation("每日娱乐次数上限") { repository.updateDeveloperQuotaLimits(value, snapshot.limits.maxEntertainmentDurationMinutes) }
             }
@@ -191,14 +201,14 @@ fun DeveloperCenterScreen(
                 runOperation("今日单次娱乐时间") { repository.debugUpdateTodayQuota(snapshot.dailyLimit, snapshot.usedCount, value, false) }
             }
         }
-        DeveloperActionCard("状态重置") {
+        DeveloperActionCard("actions_reset", "状态重置", expandedSections, onSectionExpandedChange) {
             DeveloperResetAction.entries.forEach { action ->
                 OutlinedButton(onClick = { pendingReset = action }, modifier = Modifier.fillMaxWidth()) {
                     Text(action.title)
                 }
             }
         }
-        DeveloperActionCard("工具") {
+        DeveloperActionCard("actions_tools", "工具", expandedSections, onSectionExpandedChange) {
             OutlinedButton(onClick = { refresh("manual") }, modifier = Modifier.fillMaxWidth()) { Text("刷新当前状态") }
             OutlinedButton(onClick = onOpenAccessibility, modifier = Modifier.fillMaxWidth()) { Text("打开无障碍设置") }
             OutlinedButton(onClick = onOpenOverlay, modifier = Modifier.fillMaxWidth()) { Text("打开悬浮窗设置") }
@@ -234,17 +244,59 @@ private enum class DeveloperResetAction(val title: String, val impact: String) {
 }
 
 @Composable
-private fun DeveloperStatusCard(title: String, content: @Composable () -> Unit) = DeveloperCard(title, content)
+private fun DeveloperStatusCard(
+    id: String,
+    title: String,
+    expandedSections: Set<String>,
+    onExpandedChange: (String, Boolean) -> Unit,
+    content: @Composable () -> Unit
+) = DeveloperCard(id, title, id in expandedSections, onExpandedChange, content)
 
 @Composable
-private fun DeveloperActionCard(title: String, content: @Composable () -> Unit) = DeveloperCard(title, content)
+private fun DeveloperActionCard(
+    id: String,
+    title: String,
+    expandedSections: Set<String>,
+    onExpandedChange: (String, Boolean) -> Unit,
+    content: @Composable () -> Unit
+) = DeveloperCard(id, title, id in expandedSections, onExpandedChange, content)
 
 @Composable
-private fun DeveloperCard(title: String, content: @Composable () -> Unit) {
+private fun DeveloperCard(
+    id: String,
+    title: String,
+    expanded: Boolean,
+    onExpandedChange: (String, Boolean) -> Unit,
+    content: @Composable () -> Unit
+) {
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(FocusGateMotion.SHORT_MS),
+        label = "developer-arrow-$id"
+    )
     OutlinedCard(modifier = Modifier.fillMaxWidth(), border = BorderStroke(1.dp, Color(0xFFE1E1D9))) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            content()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                TextButton(onClick = {
+                    Log.d(SearchGateMotionLog.TAG, "developer section ${if (expanded) "collapse" else "expand"} start id=$id")
+                    onExpandedChange(id, !expanded)
+                }) {
+                    Text(if (expanded) "收起" else "展开")
+                    Text("⌄", modifier = Modifier.rotate(arrowRotation))
+                }
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(tween(FocusGateMotion.MEDIUM_MS)) + fadeIn(tween(FocusGateMotion.SHORT_MS)),
+                exit = shrinkVertically(tween(FocusGateMotion.MEDIUM_MS)) + fadeOut(tween(FocusGateMotion.SHORT_MS))
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) { content() }
+            }
         }
     }
 }

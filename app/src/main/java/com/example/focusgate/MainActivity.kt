@@ -10,8 +10,22 @@ import android.provider.Settings
 import android.util.Log
 import android.widget.NumberPicker
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -60,9 +74,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -157,19 +175,21 @@ fun AppSurface(content: @Composable () -> Unit) {
 
 @Composable
 private fun CollapsibleSection(
-    repository: GuardRepository,
     moduleKey: String,
     title: String,
     summary: String,
-    defaultExpanded: Boolean,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     forceExpanded: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    var expanded by remember(moduleKey) {
-        mutableStateOf(repository.isModuleExpanded(moduleKey, defaultExpanded))
-    }
     val shownExpanded = forceExpanded || expanded
     val borderColor = if (forceExpanded) MaterialTheme.colorScheme.error else Color(0xFFD8D8CF)
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (shownExpanded) 180f else 0f,
+        animationSpec = tween(FocusGateMotion.SHORT_MS),
+        label = "module-arrow-$moduleKey"
+    )
 
     OutlinedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -193,17 +213,28 @@ private fun CollapsibleSection(
                 TextButton(
                     onClick = {
                         if (!forceExpanded) {
-                            expanded = !expanded
-                            repository.setModuleExpanded(moduleKey, expanded)
+                            Log.d(SearchGateMotionLog.TAG, "module ${if (expanded) "collapse" else "expand"} start id=$moduleKey")
+                            onExpandedChange(!expanded)
                         }
                     },
                     enabled = !forceExpanded
                 ) {
-                    Text(if (shownExpanded) "收起" else "展开")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (shownExpanded) "收起" else "展开")
+                        Text("⌄", modifier = Modifier.rotate(arrowRotation))
+                    }
                 }
             }
-            if (shownExpanded) {
-                content()
+            AnimatedVisibility(
+                visible = shownExpanded,
+                enter = expandVertically(tween(FocusGateMotion.MEDIUM_MS)) +
+                    fadeIn(tween(FocusGateMotion.SHORT_MS)) +
+                    slideInVertically(tween(FocusGateMotion.MEDIUM_MS)) { -it / 12 },
+                exit = shrinkVertically(tween(FocusGateMotion.MEDIUM_MS)) +
+                    fadeOut(tween(FocusGateMotion.SHORT_MS)) +
+                    slideOutVertically(tween(FocusGateMotion.MEDIUM_MS)) { -it / 12 }
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
             }
         }
     }
@@ -236,8 +267,30 @@ private fun MainScreen(
     var developerQuotaLimits by remember { mutableStateOf(repository.developerQuotaLimits()) }
     var showDeveloperCenter by rememberSaveable { mutableStateOf(false) }
     var showDeveloperPasswordDialog by remember { mutableStateOf(false) }
+    var targetPickerEditing by rememberSaveable { mutableStateOf(false) }
+    var cancelTargetEditingVersion by remember { mutableIntStateOf(0) }
     var developerTapCount by remember { mutableStateOf(0) }
     var firstDeveloperTapAt by remember { mutableStateOf(0L) }
+    var moduleExpanded by remember {
+        mutableStateOf(
+            mapOf(
+                "permissions" to repository.isModuleExpanded("permissions", !repository.hasTodayEntertainmentPlan()),
+                "targets" to repository.isModuleExpanded("targets", true),
+                "quota" to repository.isModuleExpanded("quota", true),
+                "status" to repository.isModuleExpanded("status", true),
+                "advanced" to repository.isModuleExpanded("advanced", false)
+            )
+        )
+    }
+    var homeExpandedHistory by rememberSaveable {
+        mutableStateOf(moduleExpanded.filterValues { it }.keys.toList())
+    }
+    var developerExpanded by rememberSaveable {
+        mutableStateOf(setOf("status_basic", "status_quota", "status_recognition", "actions_switches"))
+    }
+    var developerExpandedHistory by rememberSaveable {
+        mutableStateOf(developerExpanded.toList())
+    }
     val state = repository.state()
     val hasTodayQuota = repository.hasTodayEntertainmentPlan()
     val initialQuotaSelection = QuotaPolicy.sanitizeUserSelection(
@@ -261,6 +314,85 @@ private fun MainScreen(
     val entertainmentActive = state.entertainmentPackage != null && System.currentTimeMillis() < state.entertainmentUntil
     val permissionForceExpanded = !criticalPermissionsOk || !hasTodayQuota
     val selectedCount = selectedInstalledApps.size
+    val currentPage = when {
+        showTargetPicker -> FocusGatePage.TARGET_PICKER
+        showDeveloperCenter && developerModeEnabled -> FocusGatePage.DEVELOPER_CENTER
+        else -> FocusGatePage.HOME
+    }
+
+    fun setHomeModuleExpanded(moduleId: String, expanded: Boolean) {
+        moduleExpanded = moduleExpanded + (moduleId to expanded)
+        repository.setModuleExpanded(moduleId, expanded)
+        homeExpandedHistory = if (expanded) {
+            UiBackStateResolver.recordExpanded(homeExpandedHistory, moduleId)
+        } else {
+            UiBackStateResolver.recordCollapsed(homeExpandedHistory, moduleId)
+        }
+    }
+
+    fun setDeveloperSectionExpanded(moduleId: String, expanded: Boolean) {
+        developerExpanded = if (expanded) developerExpanded + moduleId else developerExpanded - moduleId
+        developerExpandedHistory = if (expanded) {
+            UiBackStateResolver.recordExpanded(developerExpandedHistory, moduleId)
+        } else {
+            UiBackStateResolver.recordCollapsed(developerExpandedHistory, moduleId)
+        }
+    }
+
+    fun backResolution(): BackResolution = UiBackStateResolver.resolve(
+        BackUiState(
+            page = currentPage,
+            overlayVisible = showDeveloperPasswordDialog,
+            editing = currentPage == FocusGatePage.TARGET_PICKER && targetPickerEditing,
+            expandedModuleHistory = when (currentPage) {
+                FocusGatePage.HOME -> homeExpandedHistory.filter { moduleId ->
+                    moduleExpanded[moduleId] == true &&
+                        !(moduleId == "permissions" && permissionForceExpanded) &&
+                        !(moduleId == "quota" && !hasTodayQuota) &&
+                        !(moduleId == "status" && entertainmentActive)
+                }
+                FocusGatePage.DEVELOPER_CENTER -> developerExpandedHistory.filter { it in developerExpanded }
+                FocusGatePage.TARGET_PICKER -> emptyList()
+            }
+        )
+    )
+
+    fun handleBack(source: String) {
+        val resolution = backResolution()
+        Log.i(
+            SearchGateBackNavigationLog.TAG,
+            "received source=$source page=$currentPage overlay=$showDeveloperPasswordDialog expanded=${resolution.moduleId} action=${resolution.action}"
+        )
+        when (resolution.action) {
+            BackAction.CLOSE_OVERLAY -> showDeveloperPasswordDialog = false
+            BackAction.CANCEL_EDITING -> {
+                targetPickerEditing = false
+                cancelTargetEditingVersion += 1
+            }
+            BackAction.COLLAPSE_MODULE -> resolution.moduleId?.let { moduleId ->
+                if (currentPage == FocusGatePage.DEVELOPER_CENTER) {
+                    setDeveloperSectionExpanded(moduleId, false)
+                } else {
+                    setHomeModuleExpanded(moduleId, false)
+                }
+            }
+            BackAction.POP_PAGE -> when (currentPage) {
+                FocusGatePage.TARGET_PICKER -> {
+                    selectedInstalledApps = repository.targetAppConfigs().filter { it.isEnabled }.associate { it.packageName to it.appName }
+                    showTargetPicker = false
+                }
+                FocusGatePage.DEVELOPER_CENTER -> {
+                    developerQuotaLimits = repository.developerQuotaLimits()
+                    showDeveloperCenter = false
+                }
+                FocusGatePage.HOME -> Unit
+            }
+            BackAction.EXIT_APP -> Unit
+        }
+    }
+
+    val backAction = backResolution().action
+    BackHandler(enabled = backAction != BackAction.EXIT_APP) { handleBack("system") }
 
     LaunchedEffect(Unit) {
         Log.i(
@@ -274,6 +406,9 @@ private fun MainScreen(
             "developer mode badge visible=$developerModeEnabled screen=main"
         )
     }
+    LaunchedEffect(currentPage) {
+        Log.d(SearchGateMotionLog.TAG, "page entered=$currentPage")
+    }
 
     if (showDeveloperPasswordDialog) {
         DeveloperPasswordDialog(
@@ -286,45 +421,47 @@ private fun MainScreen(
         )
     }
 
-    if (showTargetPicker) {
-        TargetAppPickerScreen(
-            repository = repository,
-            requestedAtElapsedRealtime = targetPickerRequestedAt,
-            developerModeEnabled = developerModeEnabled,
-            onBack = {
-                selectedInstalledApps = repository.targetAppConfigs()
-                    .filter { it.isEnabled }
-                    .associate { it.packageName to it.appName }
-                showTargetPicker = false
-            }
-        )
-        return
-    }
-
-    if (showDeveloperCenter && developerModeEnabled) {
-        DeveloperCenterScreen(
-            repository = repository,
-            accessibilityEnabled = accessibilityEnabled,
-            overlayEnabled = overlayEnabled,
-            notificationEnabled = notificationEnabled,
-            onBack = {
-                developerQuotaLimits = repository.developerQuotaLimits()
-                showDeveloperCenter = false
-            },
-            onExit = {
-                repository.setDeveloperModeEnabled(false)
-                developerModeEnabled = false
-                showDeveloperCenter = false
-            },
-            onOpenAppDetails = onOpenAppDetails,
-            onOpenAccessibility = onOpenAccessibility,
-            onOpenOverlay = onOpenOverlay,
-            onOpenNotification = onOpenNotification
-        )
-        return
-    }
-
-    Column(
+    AnimatedContent(
+        targetState = currentPage,
+        transitionSpec = {
+            val deeper = targetState.depth > initialState.depth
+            val enterOffset: (Int) -> Int = { width -> if (deeper) width / 8 else -width / 10 }
+            val exitOffset: (Int) -> Int = { width -> if (deeper) -width / 10 else width / 8 }
+            (slideInHorizontally(tween(FocusGateMotion.PAGE_MS), initialOffsetX = enterOffset) +
+                fadeIn(tween(FocusGateMotion.MEDIUM_MS))) togetherWith
+                (slideOutHorizontally(tween(FocusGateMotion.PAGE_MS), targetOffsetX = exitOffset) +
+                    fadeOut(tween(FocusGateMotion.MEDIUM_MS)))
+        },
+        label = "focusgate-page"
+    ) { page ->
+        when (page) {
+            FocusGatePage.TARGET_PICKER -> TargetAppPickerScreen(
+                repository = repository,
+                requestedAtElapsedRealtime = targetPickerRequestedAt,
+                developerModeEnabled = developerModeEnabled,
+                cancelEditingVersion = cancelTargetEditingVersion,
+                onEditingChanged = { targetPickerEditing = it },
+                onBack = { handleBack("software") }
+            )
+            FocusGatePage.DEVELOPER_CENTER -> DeveloperCenterScreen(
+                repository = repository,
+                accessibilityEnabled = accessibilityEnabled,
+                overlayEnabled = overlayEnabled,
+                notificationEnabled = notificationEnabled,
+                expandedSections = developerExpanded,
+                onSectionExpandedChange = ::setDeveloperSectionExpanded,
+                onBack = { handleBack("software") },
+                onExit = {
+                    repository.setDeveloperModeEnabled(false)
+                    developerModeEnabled = false
+                    showDeveloperCenter = false
+                },
+                onOpenAppDetails = onOpenAppDetails,
+                onOpenAccessibility = onOpenAccessibility,
+                onOpenOverlay = onOpenOverlay,
+                onOpenNotification = onOpenNotification
+            )
+            FocusGatePage.HOME -> Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
@@ -365,11 +502,11 @@ private fun MainScreen(
         HorizontalDivider()
 
         CollapsibleSection(
-            repository = repository,
             moduleKey = "permissions",
             title = "权限状态",
             summary = if (criticalPermissionsOk) "关键权限正常" else "关键权限异常，限制能力会失效",
-            defaultExpanded = !hasTodayQuota,
+            expanded = moduleExpanded["permissions"] == true,
+            onExpandedChange = { setHomeModuleExpanded("permissions", it) },
             forceExpanded = permissionForceExpanded
         ) {
         if (!notificationEnabled) {
@@ -403,11 +540,11 @@ private fun MainScreen(
         HorizontalDivider()
 
         CollapsibleSection(
-            repository = repository,
             moduleKey = "targets",
             title = "目标应用",
             summary = "当前限制应用数：$selectedCount",
-            defaultExpanded = true
+            expanded = moduleExpanded["targets"] == true,
+            onExpandedChange = { setHomeModuleExpanded("targets", it) }
         ) {
         Text("当前限制应用数：$selectedCount")
         Button(
@@ -428,7 +565,6 @@ private fun MainScreen(
         HorizontalDivider()
 
         CollapsibleSection(
-            repository = repository,
             moduleKey = "quota",
             title = "今日额度",
             summary = if (hasTodayQuota) {
@@ -436,7 +572,8 @@ private fun MainScreen(
             } else {
                 "未确认"
             },
-            defaultExpanded = true,
+            expanded = moduleExpanded["quota"] == true,
+            onExpandedChange = { setHomeModuleExpanded("quota", it) },
             forceExpanded = !hasTodayQuota
         ) {
         if (!hasTodayQuota) {
@@ -533,11 +670,11 @@ private fun MainScreen(
         HorizontalDivider()
 
         CollapsibleSection(
-            repository = repository,
             moduleKey = "status",
             title = "当前状态",
             summary = if (entertainmentActive) "娱乐倒计时进行中" else "当前未处于娱乐放行",
-            defaultExpanded = true,
+            expanded = moduleExpanded["status"] == true,
+            onExpandedChange = { setHomeModuleExpanded("status", it) },
             forceExpanded = entertainmentActive
         ) {
         Text("当前状态", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -558,17 +695,19 @@ private fun MainScreen(
         }
 
         CollapsibleSection(
-            repository = repository,
             moduleKey = "advanced",
             title = "高级设置",
             summary = "守卫阈值和系统详情",
-            defaultExpanded = false
+            expanded = moduleExpanded["advanced"] == true,
+            onExpandedChange = { setHomeModuleExpanded("advanced", it) }
         ) {
             GuardSettingsPanel(repository = repository)
             OutlinedButton(onClick = onOpenAppDetails, modifier = Modifier.fillMaxWidth()) {
                 Text("打开系统应用详情")
             }
             Text("版本：v0.6.0", style = MaterialTheme.typography.bodySmall)
+        }
+    }
         }
     }
 }
@@ -700,6 +839,8 @@ private fun TargetAppPickerScreen(
     repository: GuardRepository,
     requestedAtElapsedRealtime: Long,
     developerModeEnabled: Boolean,
+    cancelEditingVersion: Int,
+    onEditingChanged: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
     var installedApps by remember { mutableStateOf(repository.cachedInstalledLaunchableApps()) }
@@ -715,6 +856,16 @@ private fun TargetAppPickerScreen(
     var appSearchQuery by remember { mutableStateOf("") }
     var filterMode by remember { mutableStateOf("all") }
     var message by remember { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(cancelEditingVersion) {
+        if (cancelEditingVersion > 0) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            onEditingChanged(false)
+        }
+    }
 
     LaunchedEffect(developerModeEnabled) {
         Log.i(
@@ -818,7 +969,8 @@ private fun TargetAppPickerScreen(
             onValueChange = { appSearchQuery = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp),
+                .height(48.dp)
+                .onFocusChanged { onEditingChanged(it.isFocused) },
             singleLine = true,
             placeholder = { Text("搜索应用") }
         )

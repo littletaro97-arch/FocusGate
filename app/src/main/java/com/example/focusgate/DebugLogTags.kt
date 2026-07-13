@@ -36,6 +36,14 @@ object SearchGateDeveloperCenterLog {
     const val TAG = "SearchGateDeveloperCenter"
 }
 
+object SearchGateBackNavigationLog {
+    const val TAG = "SearchGateBackNavigation"
+}
+
+object SearchGateMotionLog {
+    const val TAG = "SearchGateMotionDebug"
+}
+
 object SearchGateTargetAppLockLog {
     const val TAG = "SearchGateTargetAppLockDebug"
 }
